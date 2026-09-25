@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+        ManaKeyDumper 注入 DLL（NativeAOT，导出 YaeMain）。
+        结构复制自 star_rail_sniffer/inject（GPL-3.0, 源自 YaeAchievementLib）。
+    -->
+
+    <PropertyGroup>
+        <Nullable>enable</Nullable>
+        <LangVersion>preview</LangVersion>
+        <RootNamespace>GenshinSniffer</RootNamespace>
+        <AssemblyName>ManaKeyDumper</AssemblyName>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <TargetFramework>net9.0-windows</TargetFramework>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <PublishAot>true</PublishAot>
+        <PlatformTarget>x64</PlatformTarget>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <OptimizationPreference>Speed</OptimizationPreference>
+        <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <DirectPInvoke Include="KERNEL32" />
+        <DirectPInvoke Include="libMinHook.x64" />
+        <NativeLibrary Include="lib\libMinHook.x64.lib" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.DisableRuntimeMarshallingAttribute" />
+    </ItemGroup>
+
+</Project>

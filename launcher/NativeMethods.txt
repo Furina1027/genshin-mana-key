@@ -1,0 +1,20 @@
+// kernel32
+ResumeThread
+Module32Next
+Module32First
+CreateProcess
+LoadLibraryEx
+VirtualFreeEx
+VirtualAllocEx
+GetProcAddress
+TerminateProcess
+CreateRemoteThread
+WriteProcessMemory
+WaitForSingleObject
+CreateToolhelp32Snapshot
+CloseHandle
+OpenProcess
+GetExitCodeProcess
+
+// psapi
+GetModuleFileNameEx
