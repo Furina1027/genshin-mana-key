@@ -384,17 +384,20 @@ internal static unsafe class Application {
     /// 入参是已经解析好的托管字符串：调用点还要用它打 MANAFILE/DIAG 行，
     /// 传字符串可以避免同一个 path 被解析两次（每次都是一次堆分配）。
     /// </summary>
-    private static void SetCurrentFile(string raw) {
+    private static string? SetCurrentFile(string raw) {
         // ReadIl2CppString 的失败哨兵都以 '(' 开头：(null)/(unreadable)/(bad len N)/(read error)
         if (raw.Length == 0 || raw[0] == '(') {
-            return;
+            return null;
         }
         var name = Path.GetFileName(raw);
         if (name.Length == 0) {
-            return;
+            return null;
         }
         // 跨线程访问：写用 Volatile.Write，读用 Volatile.Read（见 PublishBcKey）
+        var previous = Volatile.Read(ref s_curFile);
         Volatile.Write(ref s_curFile, name);
+        // 返回"确实换文件了"时的新名字：调用方据此决定要不要补报仍然生效的密钥
+        return string.Equals(name, previous, StringComparison.Ordinal) ? null : name;
     }
 
     private static string ReadIl2CppByteArrayHex(nint arr) {
@@ -753,10 +756,15 @@ internal static unsafe class Application {
 
         // ★ A2：先归属文件名，再上报 —— MANAFILE 与后续 BCKEY 必须是同一个文件
         var txt = ReadIl2CppString(path);
-        SetCurrentFile(txt);
+        var changedFile = SetCurrentFile(txt);
 
         try {
             Goshujin.Report($"MANAFILE [{playerIndex}] {txt}");
+            // 换了视频时把"仍然生效的那把"按新文件名补报一条 —— **默认关闭**（GMK_REUSE=1 才开）：
+            // 实测每个视频都会自己重建密钥对象并报 BCKEY，补报只会在换新钥匙时抢跑误报（见 ReportInEffectKey）
+            if (changedFile != null) {
+                ReportInEffectKey(changedFile);
+            }
             var n = Interlocked.Increment(ref _cSetFileN);
             if (Options.FullDiagnostics && n <= 10) {
                 ScanObjectForKeys($"SetFileBinder[{playerIndex}]", binder, 0x300);
@@ -1164,6 +1172,10 @@ internal static unsafe class Application {
     private static int _lastBcKeyLen;
     private static int _bcKeyRepeat;
     private static int _bcKeyBusy;
+    /// <summary>上一次上报的密钥是挂在哪个文件名下的（用来判断"换视频了但钥匙没换"）。</summary>
+    private static string _lastBcKeyFile = "";
+    /// <summary>"沿用上一次密钥"的补报计数（不是 BCrypt 事件，单独计数以免混淆）。</summary>
+    private static int _cReuseKey;
 
     /// <summary>上次上报的 BCENC 内容指纹（IV + 输入前缀），A3。</summary>
     private static readonly byte[] _lastEncFingerprint = new byte[24];
@@ -1275,26 +1287,69 @@ internal static unsafe class Application {
         }
         try {
             var key = new ReadOnlySpan<byte>((void*) pbSecret, len);
+            var file = Volatile.Read(ref s_curFile) ?? "?";
             var lastLen = Volatile.Read(ref _lastBcKeyLen);
-            var changed = lastLen != len || !key.SequenceEqual(new ReadOnlySpan<byte>(_lastBcKey, 0, len));
-            int repeat;
-            if (changed) {
+            var keyChanged = lastLen != len || !key.SequenceEqual(new ReadOnlySpan<byte>(_lastBcKey, 0, len));
+            // 归属文件也算"变化"：CRI 的 cipher 是全局单例，密钥对象会跨视频复用
+            //（实测确认"有的视频密钥确实相同"），只看密钥内容的话，第二个同钥视频会被
+            //「同一把最多报 3 次」整段压掉 —— 23:17 那段日志里 RTF_Girl 一条 BCKEY 都没有就是这个原因。
+            var fileChanged = !string.Equals(file, _lastBcKeyFile, StringComparison.Ordinal);
+            if (keyChanged) {
                 key.CopyTo(_lastBcKey);
                 Volatile.Write(ref _lastBcKeyLen, len);
                 Interlocked.Increment(ref _cBcKeyUnique);
-                repeat = 1;
-            } else {
-                repeat = Volatile.Read(ref _bcKeyRepeat) + 1;
+            }
+            var changed = keyChanged || fileChanged;
+            var repeat = changed ? 1 : Volatile.Read(ref _bcKeyRepeat) + 1;
+            if (changed) {
+                _lastBcKeyFile = file;
             }
             Volatile.Write(ref _bcKeyRepeat, repeat);
             var total = Interlocked.Increment(ref _cBcKey);
             if (repeat > Offsets.MaxKeyRepeatReports) {
-                return;   // 同一把密钥已确认足够，之后只留计数
+                return;   // 同一「文件 + 密钥」已确认足够，之后只留计数
             }
-            var file = Volatile.Read(ref s_curFile) ?? "?";
             // 前缀与 #n/file=/len= 的位置保持不变（启动器按位置解析），新信息一律追加在末尾
             Goshujin.Report($"BCKEY #{total} file={file} len={len} {Convert.ToHexString(key)} " +
                             $"rep={repeat} uni={Volatile.Read(ref _cBcKeyUnique)}");
+        } finally {
+            Volatile.Write(ref _bcKeyBusy, 0);
+        }
+    }
+
+    /// <summary>
+    /// 把"当前仍然生效的密钥"按新文件名补报一条（带 <c>reuse=1</c> 标记）。
+    ///
+    /// **默认关闭**（<c>GMK_REUSE=1</c> 才启用），原因见 <see cref="Options.KeyReuse"/>：
+    /// 实测每个视频开始时 CRI 都会重建一次密钥对象，BCKEY 那行自带文件名，补报是多余的；
+    /// 而且在"下一个视频换新钥匙"时它会把**上一把**钥匙顶着新文件名报出去 ——
+    /// 2026-10-16 23:35 的 <c>Cs_ZD_AQ70171401_UR_Girl</c> 先报了 F5AC（错）、同一秒再报 F9E9（对），
+    /// 前台因此多出一条错误的"已配对"。
+    ///
+    /// 代码保留是为了极端场景兜底：万一某个视频一条 BCKEY 都没有，开 <c>GMK_REUSE=1</c>
+    /// 就能用"此刻 cipher 单例里仍然生效的那把"把条目补上。
+    /// </summary>
+    private static void ReportInEffectKey(string file) {
+        if (!Options.KeyReuse) {
+            return;
+        }
+        if (Interlocked.CompareExchange(ref _bcKeyBusy, 1, 0) != 0) {
+            return;   // 另一个线程正在处理，跳过（下一次 SetFile 还会来）
+        }
+        try {
+            var len = Volatile.Read(ref _lastBcKeyLen);
+            if (len <= 0 || len > Offsets.MaxSecretBytes) {
+                return;   // 本会话还没抓到过密钥，没什么可补
+            }
+            if (string.Equals(file, _lastBcKeyFile, StringComparison.Ordinal)) {
+                return;   // 就是抓到时那个文件，不必补
+            }
+            var key = new ReadOnlySpan<byte>(_lastBcKey, 0, len);
+            var n = Interlocked.Increment(ref _cReuseKey);
+            _lastBcKeyFile = file;          // 归属跟着新文件走（同一把再创建时按"文件变化"继续上报）
+            Volatile.Write(ref _bcKeyRepeat, 1);
+            Goshujin.Report($"BCKEY reuse#{n} file={file} len={len} {Convert.ToHexString(key)} " +
+                            $"reuse=1 uni={Volatile.Read(ref _cBcKeyUnique)}");
         } finally {
             Volatile.Write(ref _bcKeyBusy, 0);
         }

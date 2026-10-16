@@ -7,7 +7,7 @@
 
     <PropertyGroup>
         <Nullable>enable</Nullable>
-        <OutputType>Exe</OutputType>
+        <OutputType>WinExe</OutputType>
         <LangVersion>preview</LangVersion>
         <AssemblyName>ManaKeyDumper</AssemblyName>
         <ImplicitUsings>enable</ImplicitUsings>

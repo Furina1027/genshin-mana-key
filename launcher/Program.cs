@@ -26,6 +26,9 @@ internal static class Program {
     private static int _pairedCount;
 
     private static int Main(string[] args) {
+        // 排障开关：只有 GMK_CONSOLE=1 才分配控制台。
+        // 默认是 GUI 子系统，双击时**不会出现任何控制台/命令行窗口**。
+        Log.AttachConsoleIfRequested();
         Log.Write("========================================");
         Log.Write("GenshinManaKey - 原神 7.1 过场动画密钥截获 (CRI Mana / AES_HCA)");
         Log.Write("  hook: SetVideoAudioDecryptionKeys / SetVideoAesKeyAudioDecryptionKey");
@@ -41,6 +44,10 @@ internal static class Program {
     }
 
     private static int Run(string[] args) {
+        // 遮罩自检：不启动游戏、不注入，只在左下角画 20 秒，用来看位置/穿透/Alt+Tab/字体
+        if (Environment.GetEnvironmentVariable("GMK_OVERLAY_SELFTEST") == "1") {
+            return OverlaySelfTest();
+        }
         var exePath = AppConfig.GetGamePath(args.ElementAtOrDefault(0), out var pathSource);
         if (exePath == null) {
             // 运行中的实例只当作"你大概是这个路径"的提示：本启动器必须以挂起方式自己创建进程，
@@ -48,7 +55,7 @@ internal static class Program {
             var running = AppConfig.GetRunningGamePath();
             var hint = $"请把游戏目录（或 YuanShen.exe / GenshinImpact.exe 全路径）写进 {Paths.GamePathFile}，"
                      + "双击就能用；也可以作为第一个命令行参数传入。";
-            Log.Write(running == null
+            Fatal(running == null
                 ? $"未找到游戏（来源：{pathSource}）。{hint}"
                 : $"未找到游戏（来源：{pathSource}）。检测到正在运行的游戏：{running}，请先关闭它。{hint}");
             return -1;
@@ -56,14 +63,23 @@ internal static class Program {
         Log.Write($"游戏: {exePath}（{AppConfig.ServiceLabel(exePath)}，来源：{pathSource}）");
 
         if (AppConfig.IsGameRunning(exePath)) {
-            Log.Write("游戏已在运行，请先关闭游戏。");
+            Fatal("游戏已在运行，请先关闭游戏。");
             return -1;
         }
 
         var libPath = Path.Combine(AppContext.BaseDirectory, LibFileName);
         if (!File.Exists(libPath)) {
-            Log.Write($"未找到注入 DLL: {libPath}");
+            Fatal($"未找到注入 DLL: {libPath}");
             return -1;
+        }
+
+        // 遮罩窗口（左下角实时日志）：默认启用。GMK_OVERLAY=0 关闭、GMK_CONSOLE=1 同时保留控制台。
+        // 只有遮罩**真的建起来了**才去关控制台 —— 建不起来就老老实实留在控制台，不能让用户什么都看不到。
+        var overlayWanted = Environment.GetEnvironmentVariable("GMK_OVERLAY") != "0";
+        if (!overlayWanted) {
+            Log.Warn("GMK_OVERLAY=0：不使用遮罩；日志见 dumper.log（要看控制台请设 GMK_CONSOLE=1）。");
+        } else if (!OverlayWindow.Create()) {
+            Log.Warn("遮罩不可用；日志见 dumper.log（要看控制台请设 GMK_CONSOLE=1）。");
         }
 
         // 管道服务必须先起：DLL 注入后立刻连接，起晚了会漏掉最早几条上报
@@ -71,6 +87,8 @@ internal static class Program {
 
         var proc = new GameProcess(exePath);
         _proc = proc;
+        // 遮罩要知道跟谁走：拿到游戏 PID 后它每 500ms 校正一次左下角位置
+        OverlayWindow.SetTargetProcess(proc.Id);
         // 退出订阅必须早于注入：注入（远程线程 + 模块枚举）要花时间，
         // 这段窗口里游戏崩掉的话，晚订阅就永远收不到退出事件
         proc.OnExit += OnGameExit;
@@ -83,27 +101,34 @@ internal static class Program {
 
         Log.Write($"游戏进程已创建 (PID {proc.Id})，等待注入 DLL 连接...");
         if (!proc.LoadLibrary(libPath)) {
-            Log.Write($"注入失败（{DescribeInjectionError(proc.LastInjectionError)}），已终止游戏进程。");
+            Fatal($"注入失败（{DescribeInjectionError(proc.LastInjectionError)}），已终止游戏进程。");
             proc.Terminate(0);
             return -1;
         }
         var injectedBase = GameProcess.FindModuleBase(proc, LibFileName);
-        Log.Write(injectedBase != 0
-            ? $"注入复核: {LibFileName} 已在目标进程 @ 0x{injectedBase:X}"
-            : $"注入复核失败: 目标进程里找不到 {LibFileName}，后续可能收不到上报。");
+        if (injectedBase != 0) {
+            Log.Write($"注入复核: {LibFileName} 已在目标进程 @ 0x{injectedBase:X}");
+        } else {
+            Log.Warn($"注入复核失败: 目标进程里找不到 {LibFileName}，后续可能收不到上报。");
+        }
 
         Log.Write("进入游戏并播放加密过场动画（如 300317-300321 对应的剧情），配对密钥将实时写入 paired_keys.json");
 
         // 优雅退出：等游戏退出信号，再给管道读取线程最多 2 秒把管道里剩余的上报读完
         // （以前这里直接 Environment.Exit(0)，会掐掉读取线程，最后几条上报就没了）
-        GameExited.Wait();
+        if (OverlayWindow.Available) {
+            // 遮罩在的时候由主线程跑消息循环（Win32 窗口必须单线程）；游戏退出时 OnGameExit 发消息结束它
+            OverlayWindow.RunMessageLoop();
+        } else {
+            GameExited.Wait();
+        }
         try {
             if (!pipeTask.Wait(TimeSpan.FromSeconds(2))) {
-                Log.Write("管道读取线程 2 秒内未结束，放弃剩余上报。");
+                Log.Warn("管道读取线程 2 秒内未结束，放弃剩余上报。");
             }
         } catch (AggregateException e) {
             // 读取线程异常退出也要走完收尾（否则连"共截获多少条"都不打了）
-            Log.Write($"管道读取线程异常退出: {e.GetBaseException().Message}");
+            Log.Error($"管道读取线程异常退出: {e.GetBaseException().Message}");
         }
 
         var events = EventCount;
@@ -111,9 +136,9 @@ internal static class Program {
         if (paired > 0) {
             Log.Write($"共截获 {events} 条事件，已配对 {paired} 条密钥，结果见 {Paths.PairedKeys}");
         } else if (events > 0) {
-            Log.Write($"共截获 {events} 条事件，但本次没有配对出任何密钥，未生成/未更新 {Paths.PairedKeys}");
+            Log.Warn($"共截获 {events} 条事件，但本次没有配对出任何密钥，未生成/未更新 {Paths.PairedKeys}");
         } else {
-            Log.Write("未截获任何密钥（游戏内播放加密视频时才会触发）。");
+            Log.Warn("未截获任何密钥（游戏内播放加密视频时才会触发）。");
         }
         Log.Flush();
         return 0;
@@ -124,6 +149,56 @@ internal static class Program {
         var proc = _proc;
         Log.Write(proc == null ? "游戏已退出。" : $"游戏已退出 (exit code 0x{proc.ExitCode:X8})。");
         GameExited.Set();
+        // 遮罩模式：主线程正阻塞在消息循环里，发一条消息让它收尾（跨线程只能 PostMessage）
+        OverlayWindow.RequestExit();
+    }
+
+    /// <summary>
+    /// 遮罩自检（GMK_OVERLAY_SELFTEST=1）：**不启动游戏、不注入**，只在桌面左下角把遮罩跑 30 秒。
+    /// 用途是先确认"位置对不对、点击能不能穿透、Alt+Tab 里有没有它、字体好不好看" ——
+    /// 完全不涉及反作弊，出问题也只影响这一个窗口。
+    ///
+    /// 脚本刻意把两条显示规则都演一遍：
+    ///   第 1、3 秒各推一条**配对**（会上遮罩）；第 5、7 秒各推一条**普通日志**（不该上遮罩）；
+    ///   距最后一条配对满 10 秒（约第 13 秒）遮罩应自动消失；
+    ///   第 18 秒再推一条配对 → 遮罩重新出现，而且**只有这一行**（上一条已在隐藏时被清掉）。
+    /// </summary>
+    private static int OverlaySelfTest() {
+        Log.Write("GMK_OVERLAY_SELFTEST=1：只跑遮罩自检（不启动游戏、不注入），30 秒后自动退出。");
+        if (!OverlayWindow.Create()) {
+            Fatal("遮罩创建失败（自检）。");
+            return -1;
+        }
+        OverlayWindow.SetSelfTestTarget();
+        using var pair1 = new Timer(_ => Log.Pair(
+                "★★ 已配对(掩码) Cs_ZD_AQ70201201_SLT → paired_keys.json (F5AC17FFE4B4B430553AE073EB8A8A1D)"), null,
+            TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+        using var pair2 = new Timer(_ => Log.Pair(
+                "★★ 已配对 Cs_LY_EQ4025110_ZY → paired_keys.json (aes=45872521… audio=3C9B1A44…)"), null,
+            TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
+        using var noise1 = new Timer(_ => Log.Write("自检：这行是普通日志，只该进 dumper.log，不该出现在遮罩上"), null,
+            TimeSpan.FromSeconds(5), Timeout.InfiniteTimeSpan);
+        using var noise2 = new Timer(_ => Log.Warn("自检：WRN 也一样不该上遮罩"), null,
+            TimeSpan.FromSeconds(7), Timeout.InfiniteTimeSpan);
+        // 第 13 秒左右遮罩应自动消失（最后一条配对在 3 秒 + 10 秒）
+        using var pair3 = new Timer(_ => Log.Pair(
+                "★★ 已配对(视频 AES) Cs_XT_FE5021103_ZZ → paired_keys.json (aes=9E1C77B4A0D9F1E2)"), null,
+            TimeSpan.FromSeconds(18), Timeout.InfiniteTimeSpan);
+        using var stop = new Timer(_ => OverlayWindow.RequestExit(), null,
+            TimeSpan.FromSeconds(30), Timeout.InfiniteTimeSpan);
+        OverlayWindow.RunMessageLoop();
+        Log.Write("遮罩自检结束。");
+        return 0;
+    }
+
+    /// <summary>
+    /// 致命错误：写进 dumper.log **并弹一次 MessageBox**。
+    /// 为什么必须弹：双击场景下控制台可能已经被遮罩接管而隐藏（甚至一闪而过），
+    /// 只在控制台里报错等于什么都没说。
+    /// </summary>
+    private static void Fatal(string message) {
+        Log.Error(message);
+        OverlayWindow.ShowFatal("GenshinManaKey", message);
     }
 
     private static int EventCount {
@@ -154,7 +229,7 @@ internal static class Program {
                     case 0xFE: {
                         var proc = _proc; // 不能用 _proc! —— 管道线程可能比赋值先跑到这里，NRE 会直接打断读取循环
                         if (proc == null) {
-                            Log.Write("收到恢复主线程请求，但游戏进程尚未创建（已忽略）。");
+                            Log.Warn("收到恢复主线程请求，但游戏进程尚未创建（已忽略）。");
                             break;
                         }
                         proc.ResumeMainThread();
@@ -162,19 +237,19 @@ internal static class Program {
                         break;
                     }
                     default:
-                        Log.Write($"未知上报类型 0x{type:X2}，已跳过（协议可能不匹配）。");
+                        Log.Warn($"未知上报类型 0x{type:X2}，已跳过（协议可能不匹配）。");
                         break;
                 }
             }
         } catch (IOException e) when (e.Message.Contains("busy", StringComparison.OrdinalIgnoreCase)
                                      || e.Message.Contains("占用", StringComparison.Ordinal)) {
-            Log.Write($"管道创建失败（可能有残留实例占用）：{e.Message}");
+            Log.Error($"管道创建失败（可能有残留实例占用）：{e.Message}");
         } catch (IOException) {
             // 管道断开（游戏退出）—— 正常收尾路径
         } catch (Exception e) {
             // 兜底：上报线自己坏掉（管道参数非法、长度前缀错乱读到 OOM 等）也只是记一条，
             // 不能让异常回灌 Main —— 那时收尾统计与退出码都会乱掉
-            Log.Write($"管道读取异常，已停止接收上报: {e.Message}");
+            Log.Error($"管道读取异常，已停止接收上报: {e.Message}");
         }
     }
 
@@ -192,7 +267,7 @@ internal static class Program {
             File.WriteAllBytes(path, buffer);
             Log.Write($"[DLL] 已转储 {safe}.bin ({length}B)");
         } catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) {
-            Log.Write($"[DLL] 转储失败: {e.Message}");
+            Log.Warn($"[DLL] 转储失败: {e.Message}");
         }
     }
 
@@ -215,20 +290,24 @@ internal static class Program {
                 var rejected = Pairing.LastRejectReason;
                 if (rejected != null) {
                     // 被拒时 LastFile 还是上一份有效文件名，直接打会让人以为这条被采纳了
-                    Log.Write($"★ 文件（未采纳：{rejected}）: {message}");
+                    Log.Warn($"★ 文件（未采纳：{rejected}）: {message}");
                 } else if (Pairing.LastFile.Length > 0) {
                     Log.Write($"★ 文件 [{Pairing.LastIndex}]: {Pairing.LastFile}");
                 }
                 Log.Write($"[DLL] {message}");
             } else if (message.StartsWith("MANAKEY", StringComparison.Ordinal)) {
                 var rejected = Pairing.LastRejectReason;
-                Log.Write(rejected == null ? $"★ 密钥: {message}" : $"★ 密钥（未配对：{rejected}）: {message}");
+                if (rejected == null) {
+                    Log.Write($"★ 密钥: {message}");
+                } else {
+                    Log.Warn($"★ 密钥（未配对：{rejected}）: {message}");
+                }
             } else {
                 Log.Write($"[DLL] {message}");
             }
         } catch (Exception e) {
             // 单条上报处理失败不能让管道读取线程死掉（否则后续密钥全丢）
-            Log.Write($"HandleMessage 异常: {e.Message}");
+            Log.Warn($"HandleMessage 异常: {e.Message}");
         }
     }
 
@@ -246,7 +325,7 @@ internal static class Program {
         try {
             File.AppendAllText(Paths.KeysLog, message + Environment.NewLine);
         } catch (Exception e) when (e is IOException or UnauthorizedAccessException) {
-            Log.Write($"写 mana_keys.log 失败: {e.Message}");
+            Log.Warn($"写 mana_keys.log 失败: {e.Message}");
         }
     }
 
@@ -255,17 +334,20 @@ internal static class Program {
             if (entry.Kind == PairingKind.Aes) {
                 // BCKEY 通路（bcrypt）：只有视频 AES 密钥，音频 key 拿不到 —— 不写空字段
                 JsonStore.UpsertAes(Paths.PairedKeys, entry.File, entry.Aes);
-                Log.Write($"★★ 已配对(视频 AES) {entry.File} → paired_keys.json (aes={entry.Aes})");
+                Log.Pair($"★★ 已配对(视频 AES) {entry.File} → paired_keys.json (aes={entry.Aes})");
             } else if (entry.Kind == PairingKind.Method2) {
                 JsonStore.UpsertMethod2(Paths.PairedKeys, entry.File, entry.Aes, entry.Audio);
-                Log.Write($"★★ 已配对 {entry.File} → paired_keys.json (aes={Head(entry.Aes)}… audio={Head(entry.Audio)}…)");
+                Log.Pair($"★★ 已配对 {entry.File} → paired_keys.json (aes={Head(entry.Aes)}… audio={Head(entry.Audio)}…)");
             } else {
                 JsonStore.UpsertMask(Paths.PairedKeys, entry.File, entry.VideoKey);
-                Log.Write($"★★ 已配对(掩码) {entry.File} → paired_keys.json ({entry.VideoKey})");
+                Log.Pair($"★★ 已配对(掩码) {entry.File} → paired_keys.json ({entry.VideoKey})");
             }
+            // 这三行走 Log.Pair：**只有它们会上遮罩**，其余日志（含下面那些诊断）只进 dumper.log。
+            // 为什么只留这一行：遮罩贴在游戏画面上，管道诊断几十行没人会看，
+            // 真正要一眼确认的只有"这个视频配上密钥了没有"。
             Interlocked.Increment(ref _pairedCount);
         } catch (Exception e) {
-            Log.Write($"写 paired_keys.json 失败: {e.Message}");
+            Log.Error($"写 paired_keys.json 失败: {e.Message}");
         }
     }
 

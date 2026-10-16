@@ -36,7 +36,7 @@ internal static class JsonStore {
         try {
             text = File.ReadAllText(path);
         } catch (Exception e) when (e is IOException or UnauthorizedAccessException) {
-            Log.Write($"读取 {Path.GetFileName(path)} 失败（按空表继续）：{e.Message}");
+            Log.Warn($"读取 {Path.GetFileName(path)} 失败（按空表继续）：{e.Message}");
             return dict;
         }
         // 空文件（上一次写盘刚创建文件就被杀掉）没有数据可丢，不算损坏，也不需要备份
@@ -114,7 +114,7 @@ internal static class JsonStore {
             // 这里抛出，让调用方（写盘处）记录失败并放弃本次写入。
             throw new IOException($"{Path.GetFileName(path)} 已损坏（{cause.Message}），且备份为 {backup} 失败：{e.Message}", e);
         }
-        Log.Write($"★ {Path.GetFileName(path)} 内容损坏（{cause.Message}），原文件已备份为 {Path.GetFileName(backup)}，本次从空表继续。");
+        Log.Warn($"★ {Path.GetFileName(path)} 内容损坏（{cause.Message}），原文件已备份为 {Path.GetFileName(backup)}，本次从空表继续。");
     }
 
     /// <summary>用 Utf8JsonWriter 生成一段规范 JSON 值文本（转义/控制字符都由 writer 保证合法）。</summary>
@@ -155,7 +155,7 @@ internal static class JsonStore {
                     File.Delete(tmp);
                 }
             } catch (Exception e) when (e is IOException or UnauthorizedAccessException) {
-                Log.Write($"清理临时文件 {Path.GetFileName(tmp)} 失败：{e.Message}");
+                Log.Warn($"清理临时文件 {Path.GetFileName(tmp)} 失败：{e.Message}");
             }
         }
     }

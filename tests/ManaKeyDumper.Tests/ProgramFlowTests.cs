@@ -61,6 +61,20 @@ public sealed class ProgramFlowTests : IDisposable {
         Assert.False(entry.TryGetProperty("audio", out _), "音频 key 未知，不该凭空写出 audio");
     }
 
+    /// <summary>
+    /// 端到端补一个：DLL 的"跨视频同钥补报"行（reuse=1）也必须落进 paired_keys.json。
+    /// 这是 23:17 那轮 RTF_Girl 拿不到密钥的直接回归用例。
+    /// </summary>
+    [Fact]
+    public void BcKeyReuseReport_LandsInPairedKeysJson() {
+        Feed("BCKEY reuse#1 file=Cs_ZD_AQ70201101_RTF_Girl.usm len=16 F5AC17FFE4B4B430553AE073EB8A8A1D reuse=1 uni=1");
+
+        Assert.True(File.Exists(_paired), "补报行也必须生成 paired_keys.json 条目");
+        using var doc = JsonDocument.Parse(File.ReadAllText(_paired));
+        Assert.Equal("F5AC17FFE4B4B430553AE073EB8A8A1D",
+            doc.RootElement.GetProperty("Cs_ZD_AQ70201101_RTF_Girl").GetProperty("aes").GetString());
+    }
+
     /// <summary>同一把密钥重复上报（rep=1/2/3）在密钥库里只能有一条。</summary>
     [Fact]
     public void RepeatedBcKeyReports_YieldOneEntry() {

@@ -62,7 +62,7 @@ internal sealed unsafe class GameProcess {
                 OnExit?.Invoke();
             } catch (Exception e) {
                 // 回调是启动器自己的代码，但这里绝不能把异常抛回未观察的 Task（会静默变成 UnobservedTaskException）
-                Log.Write($"OnExit 处理异常（已忽略）：{e.Message}");
+                Log.Warn($"OnExit 处理异常（已忽略）：{e.Message}");
             }
         });
     }
@@ -99,7 +99,7 @@ internal sealed unsafe class GameProcess {
                     throw Win32Error("CreateRemoteThread");
                 }
                 if (Native.WaitForSingleObject(hThread, RemoteLoadTimeoutMs) != WAIT_EVENT.WAIT_OBJECT_0) {
-                    Log.Write($"等待远程 LoadLibraryW 超过 {RemoteLoadTimeoutMs} ms，继续按已加载处理。");
+                    Log.Warn($"等待远程 LoadLibraryW 超过 {RemoteLoadTimeoutMs} ms，继续按已加载处理。");
                 }
             } finally {
                 // 无论成功、超时还是抛异常都在这里回收：旧实现只在 wait 成功时才 VirtualFreeEx，

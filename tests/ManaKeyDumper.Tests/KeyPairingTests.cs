@@ -75,6 +75,34 @@ public sealed class KeyPairingTests {
     }
 
     /// <summary>DLL 拿不到归属时报 `file=?`：挂到 `?` 上比丢掉更糟（会污染密钥库）。</summary>
+    /// <summary>
+    /// "跨视频复用同一把密钥"的补报行（`BCKEY reuse#N … reuse=1`）。
+    ///
+    /// 依据 2026-10-16 23:17 实测：第二个视频 Cs_ZD_AQ70201101_RTF_Girl 的密钥流用第一个视频
+    /// 的密钥能逐字节对上，DLL 因此按新文件名补报了一条 —— 格式必须照样被接受，
+    /// 否则那个视频在 paired_keys.json 里永远没有条目。
+    /// </summary>
+    [Fact]
+    public void BcKeyReuseLine_IsPairedLikeANormalBcKey() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle(
+            "BCKEY reuse#1 file=Cs_ZD_AQ70201101_RTF_Girl.usm len=16 F5AC17FFE4B4B430553AE073EB8A8A1D reuse=1 uni=1"));
+
+        Assert.Equal("Cs_ZD_AQ70201101_RTF_Girl", entry.File);
+        Assert.Equal(PairingKind.Aes, entry.Kind);
+        Assert.Equal("F5AC17FFE4B4B430553AE073EB8A8A1D", entry.Aes);
+    }
+
+    /// <summary>同一个视频重复播放（DLL 会重复补报）时，密钥库里只能有一条。</summary>
+    [Fact]
+    public void BcKeyReuseLine_RepeatedForSameFile_IsEmittedOnce() {
+        var p = new KeyPairing();
+
+        Assert.Single(p.Handle("BCKEY reuse#1 file=Cs_Rep.usm len=16 F5AC17FFE4B4B430553AE073EB8A8A1D reuse=1"));
+        Assert.Empty(p.Handle("BCKEY reuse#2 file=Cs_Rep.usm len=16 F5AC17FFE4B4B430553AE073EB8A8A1D reuse=1"));
+    }
+
     [Fact]
     public void BcKey_WithoutFileAttribution_IsRejected() {
         var p = new KeyPairing();

@@ -123,7 +123,12 @@ internal static class Offsets {
     /// <summary>BCryptGenerateSymmetricKey 的密钥长度上限（AES-256 也就 32，留 64 足够）。</summary>
     public const int MaxSecretBytes = 64;
 
-    /// <summary>同一把密钥重复上报次数上限（用于确认稳定），之后只留计数（A3）。</summary>
+    /// <summary>
+    /// 同一个「文件名 + 密钥」重复上报次数上限（用于确认稳定），之后只留计数（A3）。
+    ///
+    /// 注意口径是"文件 + 密钥"而不是"密钥"：CRI 的 cipher 单例会跨视频复用同一把钥匙
+    /// （实测确认有的视频密钥确实相同），只按密钥内容去重会把第二个同钥视频整段压掉。
+    /// </summary>
     public const int MaxKeyRepeatReports = 3;
 
     /// <summary>同一个 BCENC 内容指纹重复上报次数上限（A3）。</summary>
