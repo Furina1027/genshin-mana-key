@@ -33,6 +33,12 @@ jobs:
   python:
     name: tools/ checks (windows)
     runs-on: windows-latest
+    # runner 的控制台代码页是 cp1252，而 tools/ 的 --help 与输出都是中文：
+    # Python 对**管道里的 stdout** 用严格编码，于是 `python tools/xxx.py --help` 会
+    # UnicodeEncodeError 非 0 退出（stderr 用 backslashreplace，所以日志里看不出来）。
+    # 这里只把 stdio 钉成 UTF-8 —— 不改脚本行为，也不开全局 UTF-8 模式。
+    env:
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
