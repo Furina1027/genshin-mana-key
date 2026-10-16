@@ -12,6 +12,13 @@ internal static class Goshujin {
     private static NamedPipeClientStream _pipeStream = null!;
     private static BinaryWriter _pipeWriter = null!;
     private static Lock _lock = null!;
+    private static int _writeFailures;
+
+    /// <summary>
+    /// 管道写失败次数。游戏/启动器先退出时写管道必然失败，这是**预期内**的，所以不给它抛异常的机会；
+    /// 但也不能完全静默（A8）—— 计数会随 Application 的会话结束汇总行一起上报。
+    /// </summary>
+    public static int WriteFailures => Volatile.Read(ref _writeFailures);
 
     public static void Init(string pipeName = "GenshinManaKeyPipe") {
         _lock = new Lock();
@@ -30,7 +37,9 @@ internal static class Goshujin {
                 _pipeWriter.Write((byte) 0xFC);
                 _pipeWriter.Write(message);
             }
-        } catch (IOException) { }
+        } catch (IOException) {
+            Interlocked.Increment(ref _writeFailures);
+        }
     }
 
     /// <summary>二进制转储: 0xFD + 文件名 + 长度 + 数据（launcher 写入 run\dump\）</summary>
@@ -43,7 +52,9 @@ internal static class Goshujin {
                 _pipeWriter.Write(data);
                 _pipeWriter.Flush();
             }
-        } catch (IOException) { }
+        } catch (IOException) {
+            Interlocked.Increment(ref _writeFailures);
+        }
     }
 
 }

@@ -18,6 +18,9 @@ echo.
 echo Make sure the game is closed. Then play an encrypted cutscene.
 echo Keys will be written to mana_keys.log and paired_keys.json.
 echo.
+echo Game path lookup order: 1) command line arg, 2) game_path.txt next to this exe,
+echo                         3) common default install paths.
+echo.
 ManaKeyDumper.exe %*
 echo.
 echo Output: %CD%

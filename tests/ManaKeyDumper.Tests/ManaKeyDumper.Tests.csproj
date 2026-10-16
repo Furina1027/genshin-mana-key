@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+        纯逻辑单元测试：只覆盖不依赖 IO/进程/管道的那部分状态机与键值存储。
+        这些恰恰是「静默丢密钥 / 把密钥配错文件」的所在，而这类失败在游戏里
+        几乎不可能靠肉眼发现。
+
+        不参与 NativeAOT 发布，只跑 dotnet test。
+    -->
+
+    <PropertyGroup>
+        <TargetFramework>net9.0-windows</TargetFramework>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <LangVersion>preview</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <IsPackable>false</IsPackable>
+        <PublishAot>false</PublishAot>
+        <AssemblyName>ManaKeyDumper.Tests</AssemblyName>
+        <RootNamespace>ManaKeyDumper.Tests</RootNamespace>
+        <EnableNETAnalyzers>true</EnableNETAnalyzers>
+        <AnalysisMode>Recommended</AnalysisMode>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <!-- 测试方法名用下划线分段，CA1707 对测试工程没有意义 -->
+        <NoWarn>$(NoWarn);CA1707</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+        <PackageReference Include="xunit" Version="2.9.3" />
+        <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\launcher\ManaKeyDumper.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!--
+            序言判据（挂钩前的安全关键门）住在注入 DLL 里，而两个工程的 AssemblyName 都是
+            ManaKeyDumper，测试工程没法同时引用两边。所以这里**链接同一份源码**：
+            被测的就是 DLL 里跑的那段逻辑，而不是复制品。
+        -->
+        <Compile Include="..\..\inject\src\Prologue.cs" Link="Prologue.cs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Using Include="Xunit" />
+    </ItemGroup>
+
+</Project>

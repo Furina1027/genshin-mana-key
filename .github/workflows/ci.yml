@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dotnet:
+    name: .NET build + tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build inject DLL (0 warnings required)
+        run: dotnet build inject/ManaKeyDumperLib.csproj -c Release -v minimal -nologo -warnaserror
+
+      - name: Build launcher (0 warnings required)
+        run: dotnet build launcher/ManaKeyDumper.csproj -c Release -v minimal -nologo -warnaserror
+
+      - name: Analyzer pass (Recommended ruleset, informational)
+        run: dotnet build inject/ManaKeyDumperLib.csproj -c Release -v minimal -nologo -p:AnalysisMode=Recommended -t:Rebuild
+        continue-on-error: true
+
+      - name: Pure-logic tests (pairing state machine + key store)
+        run: dotnet test tests/ManaKeyDumper.Tests/ManaKeyDumper.Tests.csproj -c Release --nologo
+
+  python:
+    name: tools/ checks (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pinned dependencies
+        run: python -m pip install -r tools/requirements.txt
+
+      - name: Byte-compile every tool
+        run: python -m compileall -q tools
+
+      - name: Unit tests (USM fixture, PE RVA mapping, CTR equivalence)
+        run: python -m unittest discover -s tools/tests -v
+
+      - name: Every CLI tool must expose --help
+        shell: pwsh
+        run: |
+          # 只对「有 CLI 的脚本」冒烟：pe_utils.py / usm.py 是共享库模块，没有 argparse
+          $failed = @()
+          $skipped = @()
+          Get-ChildItem tools/*.py | ForEach-Object {
+            $text = Get-Content $_.FullName -Raw
+            if ($text -notmatch 'argparse') { $skipped += $_.Name; return }
+            $null = & python $_.FullName --help 2>&1
+            if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
+          }
+          if ($failed.Count -gt 0) { Write-Error "no --help: $($failed -join ', ')"; exit 1 }
+          Write-Host "all CLI tools respond to --help (library modules skipped: $($skipped -join ', '))"
