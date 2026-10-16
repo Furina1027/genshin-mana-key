@@ -3,7 +3,7 @@
 Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播放时截获**最终解密密钥**，
 并按"正在播放的文件"自动配对，直接产出可并入 key 库的 JSON。
 
-结构仿照崩铁的 `mana_key_stable`（本身就是仿 `YaeAchievement` 的注入框架）。
+结构仿照崩铁的 `hsr-mana-key`（本身就是仿 `YaeAchievement` 的注入框架）。
 
 ## 为什么原神 7.1 需要它
 
