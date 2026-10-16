@@ -8,7 +8,8 @@
 再配一个 `.pdata` 描述函数边界、一个 methodPointer 表，验证：
   · migrate_masked 能唯一迁移，且**按 .pdata 截断**（短函数不许硬凑指纹）；
   · 两个候选时不唯一 → 非 0 退出；
-  · align_class 用全局分配对齐、能报出 7.1 新增、base71 sanity gate 不通过时非 0 退出。
+  · align_class 用全局分配对齐（没有 scipy 时退化为「互相最优」）、能报出 7.1 新增、
+    base71 sanity gate 不通过时非 0 退出。
 
 运行：python -m unittest discover -s tools/tests -v
 """
@@ -279,6 +280,9 @@ class AlignClassTest(unittest.TestCase):
                 '--base71', hex(self.rdata_off), '--json']
         return argv
 
+    @unittest.skipUnless(align_class.HAVE_SCIPY,
+                         'scipy 是可选依赖（CI 只装 requirements.txt 里四个固定依赖）：'
+                         '「全局最优先找齐全部 3 对」这组断言只在它可用时有意义')
     def test_alignment_finds_new_method(self):
         code, text = run_main(align_class, self._argv())
         self.assertEqual(code, 0, text)
@@ -292,6 +296,25 @@ class AlignClassTest(unittest.TestCase):
         self.assertEqual([m['idx71'] for m in info['new_in_71']], [703])
         self.assertEqual(info['unmappable_71'], [])
         self.assertEqual(info['unmatched_70'], [])
+
+    @unittest.skipIf(align_class.HAVE_SCIPY, '装了 scipy 就不会走退化路径')
+    def test_alignment_falls_back_without_scipy(self):
+        """没有 scipy 时退化到「互相最优」：必须如实上报后端、写出警告，且**不许错配**。
+
+        退化匹配达不到全局最优（同一份合成样本上只能找到 1 对，因此会把 701/702 也当成
+        7.1 新增 —— 这正是"有 scipy 就优先用它"的理由），所以这里只断言两条硬约束：
+        上报名是 mutual-best + 有警告，以及给出的每一对都是真配对（子集正确）。
+        """
+        code, text = run_main(align_class, self._argv())
+        self.assertEqual(code, 0, text)
+        info = json.loads(text)
+        self.assertEqual(info['matcher'], 'mutual-best')
+        self.assertTrue(any('scipy' in w for w in info['warnings']),
+                        f'退化时该给出警告，实际 warnings={info["warnings"]}')
+        self.assertGreaterEqual(len(info['matched']), 1, '退化匹配至少得找到一对')
+        for m in info['matched']:
+            self.assertEqual(m['rva71'], self.rva71[m['idx70'] - 700],
+                             f'idx70={m["idx70"]} 配错了')
 
     def test_sanity_gate_rejects_bad_base(self):
         """base71 指到代码段 → 条目几乎都不在 il2cpp 段 → 非 0 退出。"""

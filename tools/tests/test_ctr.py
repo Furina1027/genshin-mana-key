@@ -17,6 +17,7 @@ C2 要求把「每 16 字节一次 Python 调用 + 逐字节 XOR」换成 pycryp
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 import unittest
@@ -27,6 +28,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Crypto.Cipher import AES  # noqa: E402
 
 import usm  # noqa: E402
+
+
+def has_cryptography():
+    """cryptography 是**可选**依赖（只在没有 pycryptodome 时当退路用）。
+
+    CI 只装 tools/requirements.txt 里那四个固定依赖（见该文件的「可选依赖」一节），
+    所以这里必须能"查不到就跳过"，否则可选依赖缺失会被误报成功能回归。
+    """
+    try:
+        return importlib.util.find_spec('cryptography') is not None
+    except (ImportError, ValueError):     # 被 meta_path 拦截器等挡掉时 find_spec 会抛
+        return False
+
 
 KEY = bytes.fromhex('F5AC17FFE4B4B430553AE073EB8A8A1D')
 NONCE = bytes.fromhex('DEADBEEFCAFEBABE')
@@ -114,6 +128,8 @@ class TestCounterEquivalence(unittest.TestCase):
         with self.assertRaises(ValueError):
             usm.ctr_xor(b'x' * 16, KEY, NONCE, 0, backend='nope')
 
+    @unittest.skipUnless(has_cryptography(),
+                         '没装可选的 cryptography：退路本身无从验证（CI 只装固定依赖）')
     def test_cryptography_fallback_is_real(self):
         """没有 pycryptodome 时退到 cryptography 的 ECB —— 不是「检测到就退出」的死分支。"""
         want = naive_keystream(KEY, NONCE, 5, 48)          # 先在正常环境里算参考值
