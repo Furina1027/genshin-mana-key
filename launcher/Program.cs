@@ -31,8 +31,9 @@ internal static class Program {
         Log.AttachConsoleIfRequested();
         Log.Write("========================================");
         Log.Write("GenshinManaKey - 原神 7.1 过场动画密钥截获 (CRI Mana / AES_HCA)");
-        Log.Write("  hook: SetVideoAudioDecryptionKeys / SetVideoAesKeyAudioDecryptionKey");
-        Log.Write("        + 两个 NativeMethods_* P/Invoke 包装 + NativeMethods_SetFile(文件名)");
+        Log.Write("  hook: bcrypt.dll!BCryptGenerateSymmetricKey（唯一的 key 来源）");
+        Log.Write("        bcrypt.dll!BCryptEncrypt（密钥流验证）");
+        Log.Write("        NativeMethods_SetFile（唯一的文件名来源；默认唯一挂的 il2cpp 钩子）");
         Log.Write("  输出: mana_keys.log(原始) + paired_keys.json(按文件名配对, 可直接并入 key 库)");
         Log.Write("========================================");
         try {

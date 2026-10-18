@@ -29,38 +29,159 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 ⇒ 这 11 个 method2 文件用旧体系解不开**不是方法问题，是体系换代**。
 
-## Hook 一览（RVA 相对 exe 基址，均已双服交叉验证）
+## Hook 一览（RVA 相对 exe 基址）
 
-| 钩子 | 方法 | 国服 YuanShen.exe | 国际服 GenshinImpact.exe |
-|---|---|---|---|
-| S2 | `SetVideoAudioDecryptionKeys(ulong videoKey, ulong audioKey)` | `0x070546F0` | `0x070515D0` |
-| S3 | `SetVideoAesKeyAudioDecryptionKey(byte[] aesKey, ulong audioKey)` | `0x07054B80` | `0x07051A60` |
-| N2 | `NativeMethods_SetVideoAudioDecryptionKeys(int, ulong, ulong)` | `0x070547F0` | `0x070516D0` |
-| N3 | `NativeMethods_SetVideoAesKeyAudioDecryptionKey2(int, byte[], ulong)` | `0x07054A70` | `0x07051950` |
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` |
+| 钩子 | 方法 | 国服 YuanShen.exe | 国际服 GenshinImpact.exe | 默认挂 |
+|---|---|---|---|---|
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一）** |
+| S2 | `SetVideoAudioDecryptionKeys(ulong videoKey, ulong audioKey)` | `0x070546F0` | `0x070515D0` | 否（仅 `GMK_FULL=1`） |
+| S3 | `SetVideoAesKeyAudioDecryptionKey(byte[] aesKey, ulong audioKey)` | `0x070548F0` | `0x070517D0` | 否（仅 `GMK_FULL=1`） |
+| N2 | `NativeMethods_SetVideoAudioDecryptionKeys(int, ulong, ulong)` | `0x070547F0` | `0x070516D0` | 否（仅 `GMK_FULL=1`） |
+| N3 | `NativeMethods_SetVideoAesKeyAudioDecryptionKey(int, byte[], ulong)` | `0x07054A70` | `0x07051950` | 否（仅 `GMK_FULL=1`） |
 
+> **默认运行只挂 NF 这一个 il2cpp 钩子。** S2/S3/N2/N3 的 RVA 仍然内置，但实测整场游戏
+> **0 次调用**（见下面「实际起作用的钩子」），只在 `GMK_FULL=1` 时才挂出来做诊断。
+>
 > ⚠️ 与崩铁的关键差异：原神的 IL2CPP 代码**在 exe 里**（`il2cpp` 段），
 > **没有 GameAssembly.dll**；而且 exe **不导出任何 il2cpp_\* API**（只有 4 个导出）。
 > 所以只能走 RVA 路线，不能运行时按类名反射找方法。
 
 > 📌 两套 RVA 已内置在 `inject/src/Application.cs` 的 `Cn` / `Gl` 常量集里，按主模块名
 > （`YuanShen.exe` / `GenshinImpact.exe`）自动选择，日志会打印「生效 RVA 常量集 = …」。
-> **国际服只有上表这 5 个核心钩子有 RVA**；其余诊断项没有交叉验证过的值，一律写 0 并跳过
+> **国际服只有上表这 5 个 MANAKEY/文件名 RVA 有依据**；其余诊断项没有交叉验证过的值，一律写 0 并跳过
 > （日志里是 `[skip] … RVA=0（按设计跳过）`）—— 不拿猜测值去挂钩。
 >
 > 挂钩前会用 exe 自己的 PE 节表校验 RVA 落在**可执行节**内、地址可读、序言合法；
 > 任一步不过就跳过并打印「RVA 可能已过期」。游戏更新后 RVA 失效时，是"少挂钩"而不是"崩游戏"。
 
+## 实际起作用的钩子（2026-10-16 默认配置实测）
+
+一整轮里每个钩子的**命中次数**（`run/dumper.log`，5 个视频）：
+
+| 钩子 | 命中 | 作用 |
+|---|---|---|
+| `bcrypt.dll!BCryptGenerateSymmetricKey` | BCKEY 15 条（每视频 rep=1/2/3） | ★ **唯一的 key 来源**（16 字节 AES-128） |
+| `NativeMethods_SetFile` @ `0x070538C0` | MANAFILE 5 条 | ★ **唯一的文件名来源**（key → 视频 归属） |
+| `bcrypt.dll!BCryptEncrypt` | BCENC 15 条 | 只做密钥流验证（IN=计数块/OUT=密钥流），**不产出 key** |
+| S2 / N2 / N3 | **0** | 方法存在、RVA 正确，但游戏不走这条托管 API |
+| S3 | **0** | ⚠️ 旧值 `0x07054B80` 其实是 `Player.UpdateWithUserTime`（挂错，已修正为 `0x070548F0`） |
+| 托管 `SetFile` / KeyFeed / DECKEY / CRICIPHER / CRIKEY | **0**（默认不挂） | 历史 `GMK_FULL=1` 轮次里 KeyFeed 命中 16 次，抓到的 CRIKEY 是 `D0070002…`（不是密钥） |
+
+`run/mana_keys.log` 里也只有两种行：`BCKEY` + `MANAFILE` —— 这是"只有这两个钩子在生产"的直接证据。
+
+**所以默认运行只需要**：`bcrypt.dll` 的 2 个导出钩子（key + 验证）+ 1 个 il2cpp 钩子（文件名）。
+v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`（`AttachManaKeyHooks`），默认 il2cpp 补丁面积 **5 → 1**。
+
+**这些 RVA 是怎么核对的**：`cn/out` 的 dump.cs 只有方法索引、没有 RVA，所以拿
+`genshin-metadata/global/out/methods_r.csv`（国际服 7.1 全量 idx→RVA）当参照 —— 两服同一份源码、
+**同一个类内的代码布局一致**，只差一个区段恒定位移。用两个已实测的国服值标定位移
+（idx 75713 `Player.SetFile` → `0x07053800`、idx 75746 `NativeMethods_SetFile` → `0x070538C0`，
+两者相隔 33 个方法、位移都是 `0x3120`），再反查全部常量：S2/S3/N2/N3 分别命中
+`SetVideoAudioDecryptionKeys` / `SetVideoAesKeyAudioDecryptionKey` / 两个 `NativeMethods_*` 包装 ——
+6 个常量全中、无一落空。
+
+> ⚠️ 别用"按 `.pdata` 槽位顺序对齐"或"暴力找 methodPointer 表基址"这两种做法：类内方法之间夹着
+> 非方法函数（adjustor thunk 之类），槽位会整体串位。这两种都试过并失败，上面的证据就是反例。
+
+## 版本更新后怎么把这些 RVA 重新找回来
+
+**核心事实：RVA 每次更新都会变，稳定的只有「同一个函数的代码形状」。**
+所以更新流程是"拿旧 exe 当参照、把函数迁到新 exe"，不是重新逆向一遍。
+
+### 快速通道：双击 `update_rva.cmd`（推荐）
+
+游戏更新完之后，**双击根目录的 `update_rva.cmd`** 就行（也可以把新的 `YuanShen.exe` 拖到它上面）：
+
+1. 它自己找新 exe（`run\game_path.txt` → 游戏目录；拖拽/参数优先）；
+2. 拿 `rva_cache\<exe名>` 里缓存的**上一版 exe** 当参照（脚本每次成功后自动缓存，所以这个目录别删）；
+3. 从 `inject\src\Application.cs` 读出当前常量当"旧 RVA"，用掩码指纹逐个迁到新 exe；
+4. 打印 旧→新 对照表：**只采信唯一命中**；不唯一的会把候选列出来让你选（绝不自动猜）；
+5. **没迁上的常量会写成 `0`** —— C# 侧的约定是"0 = 该服务器未定位此钩子 → 跳过并打日志"，
+   比留着旧 RVA 安全（旧 RVA 在新版本里仍可能通过"可执行节+可读+序言"三项校验，
+   于是把补丁打到别的函数上，错得不声不响）。旧值可在 `.bak-<时间戳>` 备份里找回；
+   唯一例外是 `NativeSetFile`（默认运行的关键项）：它没迁上就**什么都不写**并以非 0 退出；
+6. 确认后写回源码（自动备份 `Application.cs.bak-<时间戳>`），可选接着跑 `build.bat`。
+
+```powershell
+update_rva.cmd                 # 双击等价：问一句就写
+update_rva.cmd --yes --build   # 不问，写完直接重新编译部署
+update_rva.cmd --dry-run       # 只看结果，不写源码
+update_rva.cmd --force         # 旧/新 exe 完全相同也照跑（默认认为"没更新"直接退出）
+```
+
+> 第一次用（还没有 `rva_cache\`）时，把当前版本的 exe 复制成 `rva_cache\YuanShen.exe`，
+> 或者 `update_rva.cmd --old <旧exe>`。**这次 7.1 的 exe 已经缓存好了**，7.2 一更新直接双击即可。
+
+下面是不用脚本时的手动流程/原理，排错时看。
+
+### 它们的来历（三代叠加）
+
+1. **7.0**：从 exe 的 **methodPointer 表**读出来的（连续的 8 字节指针数组，第 i 项 =
+   全局方法索引 i 的代码地址）。表基址最初由 CDN 下发的 `to_int32` RVA 反推
+   （`tools/locate_hooks.py`：`表基址 = to_int32 指针所在文件偏移 − 1357×8`）。
+2. **7.0 → 7.1**：`tools/migrate_masked.py`（掩码指纹 + 函数边界）逐个迁移，
+   `tools/align_class.py` 对整类做序列对齐；再双服交叉验证 + 运行时实证。
+   （注意：7.0 还没有 7.1 这套 AES_HCA/BCrypt 链路，所以 7.0 **不能**拿来做这次改动的验证样本。）
+3. **2026-10-18 复核**：用国际服 7.1 全量 `idx→RVA` 表 + 两个国服实测锚点标定位移
+   （`0x3120`）反查，发现 5 个里 4 个对、S3 错指到 `Player.UpdateWithUserTime`（已修正）。
+
+### 重找（一条命令）
+
+```powershell
+python tools\migrate_masked.py --src <旧exe> --dst <新exe> `
+    --rva NF=0x070538C0 --rva S2=0x070546F0 --rva S3=0x070548F0 `
+    --rva N2=0x070547F0 --rva N3=0x07054A70 --dis
+```
+
+判据（工具自己会卡死这些）：
+- **只采信"唯一命中"**；0 个或多个候选都非 0 退出，绝不给你一个"看着合理"的地址；
+- 指纹按函数边界截断（不会吃到下一个函数），`call/jmp` 的 rel32、`rip` 相对位移、立即数
+  全部掩码 → 地址整体平移、编译器微调都不影响；
+- 输出里的 `delta` 是整体平移量，可用来给同类函数做快速换算，但**仍要逐个验证落在函数起点**。
+
+某个函数不命中时（函数体改动大）：用 `tools\align_class.py` 做**整类对齐** ——
+一个类的方法在二进制里是连续区块、顺序基本不变，整类对齐比单函数迁移稳。
+
+### 验证（三步）
+
+```powershell
+# ① 新地址必须是 .pdata/异常目录里的函数起点，且 size 合理
+python tools\pdata.py --exe <新exe> --near 0x<新RVA> --span 0x40
+# ② 反汇编看序言与参数个数
+python tools\dump_rva.py --exe <新exe> --rva 0x<新RVA> --len 20
+```
+③ 实跑一轮：日志里应只有 1 行 `hook NativeMethods_SetFile @ …`，播放几个视频能看到
+`★★ 已配对`；文件名变成 `?` 就说明 NF 挂错了。
+
+### 兜底（RVA 全失效也能出 key）
+
+`bcrypt.dll` 那两个钩子**不依赖任何 RVA**：最坏情况是"密钥照样抓得到、只是不知道是哪个视频"
+（`BCKEY file=?`），这时用别的途径拿文件名再手工对应即可。
+
+### 两个必须知道的坑
+
+**① 这版 exe 的 `.pdata` 段是诱饵。** 1,177,301 条里 588,950 条 `end<=start`，连一个真实
+函数起点都找不到；真正的 RUNTIME_FUNCTION 表被搬进 `.upx0`，**只有异常目录**（数据目录[3]，
+RVA `0x19F73B00` / `0xD796B8` 字节 / 1,177,402 条，全部合法且单调有序）指向它。
+`tools/pdata.py` 以前按名字读 `.pdata` 段 → 函数边界全错（指纹截断跟着错、迁移会误判
+"RVA 不是函数起点"）；现在**优先读异常目录**、两个来源按「合法条目占比」取信，诱饵分数写进 warning。
+
+**② 别用这两种"看起来更聪明"的对齐：**
+- 按 `.pdata` 条目的**槽位顺序**对齐方法列表 —— 类内方法之间夹着非方法函数（adjustor thunk 等），
+  槽位会整体串位（实测：会得出 `NativeMethods_SetFile` 是 `RendererResource` 的方法这种荒谬结果）；
+- 暴力搜 methodPointer 表基址再按全局索引读 —— 这张表按程序集分成多段（最大的 460,313 项），
+  没有程序集边界就对不上全局索引。
+
 ## 钩子开关（默认只挂核心，诊断要显式打开）
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `GMK_FULL=1` | 关 | 挂 9 个诊断钩子（含托管 `SetFile`、`CriWareDecrypter`、`CriManaPlugin`、`KeyFeed`）。**会显著扩大 il2cpp 代码补丁面积**；v3 实测大面积补丁会导致视频放不出来，只在定位新密钥来源时开 |
+| `GMK_FULL=1` | 关 | 再挂 **13 个诊断钩子**（4 个 MANAKEY（S2/S3/N2/N3）+ 托管 `SetFile` + `CriWareDecrypter`×3 + `CriManaPlugin`×2 + `KeyFeed` + 两个未定性方法）。**会显著扩大 il2cpp 代码补丁面积**；v3 实测大面积补丁会导致视频放不出来，只在定位新密钥来源时开 |
 | `GMK_BC=0` | 开 | 关掉 `bcrypt.dll`（系统库）钩子。默认运行**唯一真正产出密钥**的就是这条路径，所以它不跟诊断钩子一起门控 —— 除非事实证明系统库补丁也影响播放，否则不要关 |
 | `GMK_FS=1` | 关 | 启动 CRI FS 侦察线程。实测该线程会让视频无法播放，仅用于调查 |
 | `GMK_REUSE=1` | 关 | 打开「跨视频复用密钥」的补报。实测每个视频都会自己重建密钥对象并报 `BCKEY`（自带文件名），补报只会在换新钥匙时抢跑误报，仅当某个视频一条 `BCKEY` 都没有时才需要它（见下面「同一把密钥可能覆盖多个视频」） |
 
-默认运行 = **5 个核心 il2cpp 补丁 + 1 个 bcrypt 系统库补丁**。
+默认运行 = **1 个 il2cpp 补丁（NF，文件名来源）+ 2 个 bcrypt 导出钩子（取 key + 验签）**。
 
 ## 使用（需要管理员，游戏必须已关闭）
 
@@ -358,6 +479,9 @@ DIAG Plugin.SetConfigParameters a1=... a5=...
 `AttachDiagnostics()` 以前是**无条件**调用的（`GMK_FULL` 只用来打了一行日志），
 默认运行实际往 il2cpp 段打了 **14** 处补丁而不是文档说的 5 处。现在诊断钩子真正被 `GMK_FULL=1` 门控。
 
+更进一步（v19）：实测 4 个 MANAKEY 钩子**整场游戏 0 次调用**，已从默认集合移到 `GMK_FULL=1`，
+默认 il2cpp 补丁 **5 → 1**（只剩 `NativeMethods_SetFile`）。
+
 唯一保留在默认路径的是 `bcrypt.dll`（系统库）钩子：日志统计显示该会话
 `MANAKEY2/3/N2/N3` 与 `DECKEY` 全是 0 条，**唯一产出密钥的就是这条 BCKEY 路径**，
 所以它不跟诊断钩子一起关；要排除它可用 `GMK_BC=0`。
@@ -385,7 +509,8 @@ DIAG Plugin.SetConfigParameters a1=... a5=...
 2. `AppDomain.CurrentDomain.ProcessExit` 在注入式 NativeAOT DLL 里能否触发 —— 未实测，
    因此异常汇总还有「每累计 100 次打一行」的兜底。
 3. 国际服那 5 个 RVA 无法离线校验（本机只有国服客户端），值原样取自上面的表，未做任何推断。
-4. 「默认只剩 5 个 il2cpp 补丁」是静态推演（`AttachCore` 内 5 处 `MinHook.Attach`），无运行实证。
+4. 「默认只剩 1 个 il2cpp 补丁」是静态推演（`AttachCore` 内 1 处 `MinHook.Attach`）+ 实测日志里
+   只有 `hook NativeMethods_SetFile` 一行；`GMK_FULL=1` 那 13 个诊断钩子仍未逐个实机验证。
 5. 修好归属之后能否稳定产出 `paired_keys.json` —— **2026-10-16 18:14 已实测，见文末「实测结果」**。
 
 ---
@@ -398,7 +523,7 @@ DIAG Plugin.SetConfigParameters a1=... a5=...
 
 ```
 [18:14:00] 游戏: ...\YuanShen.exe（国服 YuanShen.exe，来源：game_path.txt）   ← 双击免输入生效
-[18:14:00] hook × 5 + BCRYPT [core] ...  诊断钩子未启用                    ← 默认补丁面积 = 设计值
+[18:14:00] hook × 5 + BCRYPT [core] ...  诊断钩子未启用                    ← 当轮默认（v19 起只挂 NF）
 [18:16:35] ★ 文件 [0]: Cs_ZD_AQ70201201_SLT
 [18:16:35] MANAFILE [0] ...\Cs_ZD_AQ70201201_SLT.usm
 [18:16:35] BCKEY #1 file=Cs_ZD_AQ70201201_SLT.usm len=16 F5AC17FFE4B4B430553AE073EB8A8A1D rep=1 uni=1

@@ -217,11 +217,22 @@ def main() -> int:
     if not a.json:
         print(f'src = {a.src}\ndst = {a.dst}')
         if sbounds is not None:
-            print(f'  src .pdata 函数边界: {len(sbounds):,} 个')
+            print(f'  src 函数边界[{sbounds.info.get("source", "?")}]: {len(sbounds):,} 个')
         if dbounds is not None:
-            print(f'  dst .pdata 函数边界: {len(dbounds):,} 个')
+            print(f'  dst 函数边界[{dbounds.info.get("source", "?")}]: {len(dbounds):,} 个')
+        # 边界来源不可信时（.pdata 诱饵）必须让人看见 —— 否则指纹会按错的函数尾截断。
+        # src==dst 时两边警告完全相同，去重打印。
+        seen_warn = set()
+        for bounds in (sbounds, dbounds):
+            if bounds is None:
+                continue
+            for w in bounds.warnings:
+                if w not in seen_warn:
+                    seen_warn.add(w)
+                    print(f'  ⚠ {w}')
         for w in (sbounds_warn, dbounds_warn):
-            if w:
+            if w and w not in seen_warn:
+                seen_warn.add(w)
                 print(f'  ⚠ {w}')
         print()
 

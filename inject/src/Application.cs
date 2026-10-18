@@ -7,26 +7,32 @@ namespace GenshinSniffer;
 /// <summary>
 /// GenshinManaKey 注入 DLL —— 截获原神（hk4e）7.1 过场动画的 CRI Mana 解密密钥。
 ///
-/// === 本版（v18）相对上一版的改动要点 ===
-///   · 默认只挂 5 个核心钩子；8 个诊断钩子必须 GMK_FULL=1 —— 这是 v4 起的设计，
-///     但上个版本 Awake 无条件调用 AttachDiagnostics 把它架空了（默认运行 14 处 il2cpp 补丁，
-///     而 v3 已实测大面积补丁会让视频放不出来）。
+/// === 本版（v19）相对上一版的改动要点 ===
+///   · **默认只挂 1 个 il2cpp 钩子**（NF = NativeMethods_SetFile，文件名来源）。
+///     实测证据（2026-10-16 多轮日志）：默认运行原先挂的 5 个 il2cpp 钩子里，S2/S3/N2/N3
+///     指向的方法确实存在，但**整场游戏 0 次调用**（MANAKEY2/3/N2/N3 一条都没有）——
+///     7.1 的 CRI 解密走原生 + bcrypt 通路（BCKEY/BCENC）。这 4 个已移到 GMK_FULL=1 下
+///     （AttachManaKeyHooks），默认 il2cpp 补丁面积从 5 处降到 1 处。
+///   · 顺带修正两处 RVA（见 RvaSet 注释）：S3 国服 0x07054B80→0x070548F0（旧值其实是
+///     Player.UpdateWithUserTime）、Unk5/Unk6 各 -0x10（旧值落在函数中间）。
+///   · 诊断钩子必须 GMK_FULL=1 —— v4 起的设计，上个版本 Awake 无条件调用 AttachDiagnostics
+///     把它架空了（默认运行 14 处 il2cpp 补丁，而 v3 已实测大面积补丁会让视频放不出来）。
 ///   · 文件名归属：CRI Mana 的托管签名是 SetFile(CriFsBinder binder, string fileName)，
 ///     arg0=this / arg1=binder / arg2=path。旧代码把 binder 当 path，托管侧文件名永远是 (null)；
 ///     现在两处（托管 + 原生）都写 s_curFile，且解析失败时**保留上一次的有效名字**。
 ///   · BCKEY/BCENC 不再有"总条数上限"：密钥是 per-video 的，总条数上限等于"第 N 个视频之后全丢密钥"。
 ///   · RVA 校验先走 PE 节表（可执行节）+ 可读性，绝不直接解引用过期 RVA（那是一次访问违例）。
-///   · 国际服走独立常量集（只填 README 表格里的 5 个核心 RVA），其余一律 0 = 跳过。
+///   · 国际服走独立常量集（只填 README 表格里的 5 个 MANAKEY/文件名 RVA），其余一律 0 = 跳过。
 ///
 /// 目标客户端：国服 YuanShen.exe / 国际服 GenshinImpact.exe。
 ///
 /// 上报协议（前缀与字段位置不得改动，启动器按它解析；0xFC/0xFD/0xFE 语义由 Goshujin 负责）：
-///   MANAFILE  [i] &lt;路径&gt;                NativeMethods_SetFile（native 层，带 playerIndex）
-///   MANAFILE2 &lt;路径&gt;                    SetFile（托管层，兜底）
-///   MANAKEY2  {video:X16} {audio:X16}     托管 SetVideoAudioDecryptionKeys
-///   MANAKEY3  {audio:X16} AES={hex}       托管 SetVideoAesKeyAudioDecryptionKey
-///   MANAKEYN2 [i] {video:X16} {audio:X16} NativeMethods_SetVideoAudioDecryptionKeys
-///   MANAKEYN3 [i] {audio:X16} AES={hex}   NativeMethods_SetVideoAesKeyAudioDecryptionKey2
+///   MANAFILE  [i] &lt;路径&gt;                NativeMethods_SetFile（native 层，带 playerIndex）★ 默认就挂
+///   MANAFILE2 &lt;路径&gt;                    SetFile（托管层，兜底，仅 GMK_FULL=1）
+///   MANAKEY2  {video:X16} {audio:X16}     托管 SetVideoAudioDecryptionKeys（仅 GMK_FULL=1，实测 0 次）
+///   MANAKEY3  {audio:X16} AES={hex}       托管 SetVideoAesKeyAudioDecryptionKey（同上）
+///   MANAKEYN2 [i] {video:X16} {audio:X16} NativeMethods_SetVideoAudioDecryptionKeys（同上）
+///   MANAKEYN3 [i] {audio:X16} AES={hex}   NativeMethods_SetVideoAesKeyAudioDecryptionKey（同上）
 ///   OBJKEY / OBJDMP / DIAG / BCKEY / BCENC / DECKEY / EXC   诊断行（launcher 当普通日志打印）
 ///
 /// 铁律：任何回调都不得抛出未处理异常 —— NativeAOT 下会直接带走整个游戏进程。
@@ -57,12 +63,15 @@ internal static unsafe class Application {
     /// </summary>
     private sealed class RvaSet {
         public string Name = "";
-        // —— 密钥通路（5 个核心钩子，两侧都有 README 表格依据）——
-        public uint SetVideoAudioKeys;          // S2 托管
-        public uint SetVideoAesKeyAudio;        // S3 托管
-        public uint NativeSetVideoAudioKeys;    // N2 原生包装
-        public uint NativeSetVideoAesKeyAudio;  // N3 原生包装
-        public uint NativeSetFile;              // NF ★文件名来源，唯一在所有服务器/版本上稳定触发
+        // —— 默认只挂 NF；下面 4 个 MANAKEY 只在 GMK_FULL=1 时挂 ——
+        // 这 4 个的 RVA 都有依据（国服/国际服两套表格交叉验证过），但**实测一次都没被调用**
+        //（2026-10-16 那几轮：MANAKEY2/3/N2/N3 全部 0 条，真正产出密钥的是 bcrypt 通路）。
+        // 所以它们从默认集合里移出去，默认 il2cpp 补丁从 5 处降到 1 处；留着是为了 GMK_FULL=1 时诊断。
+        public uint SetVideoAudioKeys;          // S2 托管（GMK_FULL 诊断）
+        public uint SetVideoAesKeyAudio;        // S3 托管（GMK_FULL 诊断）
+        public uint NativeSetVideoAudioKeys;    // N2 原生包装（GMK_FULL 诊断）
+        public uint NativeSetVideoAesKeyAudio;  // N3 原生包装（GMK_FULL 诊断）
+        public uint NativeSetFile;              // NF ★文件名来源，默认唯一挂的 il2cpp 钩子
         // —— 诊断钩子（仅 GMK_FULL=1 时挂）——
         public uint ManagedSetFile;
         public uint Unk5;
@@ -75,17 +84,21 @@ internal static unsafe class Application {
         public uint PluginSetConfigAdditional;
     }
 
-    /// <summary>国服 7.1（YuanShen.exe）。来源：README 的 RVA 表（7.0↔7.1 指纹迁移 + 双路径互验一致）。</summary>
+    /// <summary>
+    /// 国服 7.1（YuanShen.exe）。7.1 的值已用「国际服 7.1 全量 idx→RVA 表 + 国服实测锚点标定位移 0x3120」
+    /// 逐个反查确认（见 README「实际起作用的钩子」）：NF/S2/N2/N3 都对，S3 之前错指到
+    /// <c>Player.UpdateWithUserTime</c>，已改回真正的 <c>SetVideoAesKeyAudioDecryptionKey</c>。
+    /// </summary>
     private static readonly RvaSet Cn = new() {
         Name = "国服 YuanShen.exe 7.1",
         SetVideoAudioKeys = 0x070546F0,
-        SetVideoAesKeyAudio = 0x07054B80,
+        SetVideoAesKeyAudio = 0x070548F0,
         NativeSetVideoAudioKeys = 0x070547F0,
         NativeSetVideoAesKeyAudio = 0x07054A70,
         NativeSetFile = 0x070538C0,
-        ManagedSetFile = 0x07053800,            // 托管 SetFile（拿 player 实例）
-        Unk5 = 0x07057BF0,                      // 7.1 该类新增、尚未定性的两个方法
-        Unk6 = 0x07057C80,
+        ManagedSetFile = 0x07053800,            // 托管 SetFile = Player.SetFile(CriFsBinder, string, SetMode)
+        Unk5 = 0x07057BF0,                      // 已用异常目录边界表核过：确实是函数起点（size 133），但没定性
+        Unk6 = 0x07057C80,                      // 同上（size 141）；两者都只在 GMK_FULL=1 时挂
         KeyFeed = 0x06C4EA80,                   // key 管理器小方法（this=manager, +0x50=binder）
         DecrypterInitConfig = 0x06FE9890,       // CriWareDecrypter.Initialize(Config)
         DecrypterInit2 = 0x06FE98C0,
@@ -95,13 +108,14 @@ internal static unsafe class Application {
     };
 
     /// <summary>
-    /// 国际服 GenshinImpact.exe。来源：README 的 RVA 表 —— **只有这 5 个核心 RVA 有依据**，
-    /// 其余诊断项一律 0（未定位 = 跳过），绝不照搬国服偏移。
+    /// 国际服 GenshinImpact.exe。来源：README 的 RVA 表（= 国际服 7.1 全量 idx→RVA 表直接读出来的值）
+    /// —— 只有这 5 个 MANAKEY/文件名 RVA 有依据，其余诊断项一律 0（未定位 = 跳过），绝不照搬国服偏移。
+    /// 其中 S3 的旧值 0x07051A60 实际是 UpdateWithUserTime，已改为真正的 0x070517D0。
     /// </summary>
     private static readonly RvaSet Gl = new() {
-        Name = "国际服 GenshinImpact.exe（仅 5 个核心钩子已定位，诊断项全部未知）",
+        Name = "国际服 GenshinImpact.exe（仅 5 个 MANAKEY/文件名 RVA 已定位，诊断项全部未知）",
         SetVideoAudioKeys = 0x070515D0,
-        SetVideoAesKeyAudio = 0x07051A60,
+        SetVideoAesKeyAudio = 0x070517D0,
         NativeSetVideoAudioKeys = 0x070516D0,
         NativeSetVideoAesKeyAudio = 0x07051950,
         NativeSetFile = 0x070507A0,
@@ -160,7 +174,8 @@ internal static unsafe class Application {
                 Goshujin.Report("诊断钩子已启用（GMK_FULL=1，补丁面积大，可能影响播放）");
                 AttachDiagnostics();
             } else {
-                Goshujin.Report("诊断钩子未启用（默认只挂 5 个核心钩子；要启用请设 GMK_FULL=1）");
+                Goshujin.Report("诊断钩子未启用（默认只挂 1 个 il2cpp 钩子：NativeMethods_SetFile（文件名来源）"
+                                + " + bcrypt 的 2 个导出钩子；4 个 MANAKEY 钩子实测 0 次调用，要诊断请设 GMK_FULL=1）");
             }
 
             // v5：FS 侦察默认关闭 —— 实测只要这个后台线程存在，视频就无法播放
@@ -595,7 +610,16 @@ internal static unsafe class Application {
         return (delegate* unmanaged<nint, nint, nint, nint, nint, nint, nint, nint, void>) trampoline;
     }
 
-    // ==================== 核心钩子（密钥通路，默认只挂这 5 个） ====================
+    // ==================== 核心钩子：默认**只挂 1 个**（NF = 文件名来源） ====================
+    //
+    // 为什么砍到 1 个（实测 2026-10-16）：
+    //   默认运行的 5 个 il2cpp 补丁里只有 NativeMethods_SetFile 真正需要 —— 它提供"当前播放的视频
+    //   文件名"，是密钥归属的唯一来源（MANAFILE）。另外 4 个 MANAKEY（S2/S3/N2/N3）指向的方法确实
+    //   存在、也确实标对了（用国际服 7.1 全量 idx→RVA 表 + 国服实测锚点标定位移 0x3120 反查过），
+    //   但**整场游戏一次都没被调用**（MANAKEY2/3/N2/N3 = 0 条）：7.1 的 CRI 解密走原生 + bcrypt
+    //   通路（BCKEY/BCENC），不经这层托管 API。
+    //   少挂 4 个 il2cpp 补丁 = 默认补丁面积降到 1/5，直接降低"补丁被完整性检测/影响播放"的风险。
+    //   需要它们做诊断时设 GMK_FULL=1（见 AttachManaKeyHooks）。
 
     private static delegate* unmanaged<nint, ulong, ulong, void> _mvak;
     private static delegate* unmanaged<nint, nint, ulong, void> _mvaak;
@@ -603,7 +627,16 @@ internal static unsafe class Application {
     private static delegate* unmanaged<int, nint, ulong, void> _nvaak;
     private static delegate* unmanaged<int, nint, nint, void> _nf;
 
-    private static void AttachCore() {
+    /// <summary>
+    /// 4 个 MANAKEY 钩子（S2/S3/N2/N3）—— **只在 GMK_FULL=1 时挂**。
+    ///
+    /// 它们本该是"设密钥"的托管/原生入口，但实测 0 次调用（默认运行的日志里 MANAKEY* 一条都没有）。
+    /// 保留的原因：万一某个版本又走回托管通路，GMK_FULL=1 一开就能立刻看见，不必重新逆向。
+    ///
+    /// ★ S3 的国服值 2026-10-18 修正过：旧值 0x07054B80 经反查其实是 <c>Player.UpdateWithUserTime</c>
+    ///（会把补丁打到无关函数上），真正的 <c>SetVideoAesKeyAudioDecryptionKey</c> 是 0x070548F0。
+    /// </summary>
+    private static void AttachManaKeyHooks() {
         if (TryResolveTarget("SetVideoAudioDecryptionKeys", Rva.SetVideoAudioKeys, out var t2)) {
             Safe("AttachCore:S2", () => {
                 delegate* unmanaged<nint, ulong, ulong, void> h = &OnManagedVideoAudioKeys;
@@ -651,7 +684,15 @@ internal static unsafe class Application {
                 }
             });
         }
+    }
 
+    /// <summary>
+    /// 默认运行的**唯一** il2cpp 钩子：<c>NativeMethods_SetFile(int, IntPtr, string)</c>。
+    ///
+    /// 它是"密钥 → 视频文件名"归属的唯一来源，而且实测在所有服务器/版本上都稳定触发
+    /// （日志里的 <c>★ 文件 [i]: Cs_ZD_…</c> 就是它）。密钥本身来自 bcrypt 钩子（不在 il2cpp 段）。
+    /// </summary>
+    private static void AttachCore() {
         if (TryResolveTarget("NativeMethods_SetFile", Rva.NativeSetFile, out var nf)) {
             Safe("AttachCore:NF", () => {
                 delegate* unmanaged<int, nint, nint, void> h = &OnNativeSetFile;
@@ -800,6 +841,9 @@ internal static unsafe class Application {
     private static PeImage? _criPe;
 
     private static void AttachDiagnostics() {
+        // 4 个 MANAKEY（S2/S3/N2/N3）也归到这里：它们实测 0 次调用，默认不挂（省 4 个 il2cpp 补丁），
+        // 但 GMK_FULL=1 时仍挂起来，万一某个版本又走回托管通路能立刻看见。
+        Safe("Diag:ManaKeyHooks", AttachManaKeyHooks);
         Safe("Diag:SetFile(managed)", () => _setFileM = AttachWide("SetFile(managed)", Rva.ManagedSetFile, &OnManagedSetFile));
         Safe("Diag:CriManaNew#5", () => _unk5 = AttachWide("CriManaNew#5", Rva.Unk5, &OnUnk5));
         Safe("Diag:CriManaNew#6", () => _unk6 = AttachWide("CriManaNew#6", Rva.Unk6, &OnUnk6));

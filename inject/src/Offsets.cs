@@ -11,7 +11,7 @@ namespace GenshinSniffer;
 ///   2. 只有 CRI DLL 内部结构（随 cri_ware_unity.dll 版本变化）和上游遗留的全局偏移才留常量。
 ///
 /// ★ 注意：本文件里 exe 侧的全局偏移都只对国服 7.1 实测成立。
-///   国际服没有实测数据，绝不照搬（见 README 的 RVA 表：只给了 5 个核心钩子）。
+///   国际服没有实测数据，绝不照搬（见 README 的 RVA 表：5 个 MANAKEY/文件名 RVA，默认只挂 NF）。
 /// </summary>
 internal static class Offsets {
 

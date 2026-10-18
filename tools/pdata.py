@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""pdata.py — 解析 PE 的 .pdata（RUNTIME_FUNCTION）得到全部函数边界。
+"""pdata.py — 解析 PE 的函数边界表（RUNTIME_FUNCTION 数组）得到全部函数边界。
+
+★ **读的是异常目录（数据目录[3]），不是按名字找 `.pdata` 段。**
+  这版原神 exe 的 `.pdata` 段是**诱饵**：1,177,301 条里 588,950 条 end<=start，
+  连一个真实函数起点都找不到；真正的表被搬进 `.upx0`，只有异常目录指向它
+  （实测 RVA 0x19F73B00 / 0xD796B8 B / 1,177,402 条，全部合法、单调有序）。
+  读错表的后果很隐蔽：函数边界全错 → 指纹截断错 → 跨版本迁移匹配不到或误匹配。
+  现在两个来源都解析、按「合法条目占比」选可信的那个，另一个的分数写进 warnings。
 
 用途：在 il2cpp 段里做「精确定点」——已知若干锚点函数的 RVA 后，
       可以直接列出它们附近的全部函数（新版本新增的函数就在其中）；
@@ -106,29 +113,21 @@ class FunctionBounds:
         return out
 
 
-def parse_pdata(pe: pe_utils.PEFile, *, section_name: str = '.pdata') -> FunctionBounds:
-    """解析 .pdata 段。缺段抛 PEFormatError（显式报错，不返回空表）。"""
-    sec = pe.section_by_name(section_name)
-    warnings: list = []
-    if sec.raw_size == 0:
-        raise pe_utils.PEFormatError(f'{pe.path}: 段 {sec.name} 的 SizeOfRawData 为 0，没有数据')
-    if sec.virtual_size and sec.virtual_size < sec.raw_size:
-        warnings.append(
-            f'{sec.name}: VirtualSize 0x{sec.virtual_size:X} < SizeOfRawData 0x{sec.raw_size:X}，'
-            f'本次按**原始大小**全量解析（旧实现用 min() 会静默丢掉尾部 '
-            f'{(sec.raw_size - sec.virtual_size) // RUNTIME_FUNCTION_SIZE} 个条目）')
-    blob = pe.read_off(sec.raw_ptr, sec.raw_size)
+EXCEPTION_DIRECTORY_INDEX = 3     # IMAGE_DIRECTORY_ENTRY_EXCEPTION
 
+
+def _scan_table(pe: pe_utils.PEFile, raw_ptr: int, raw_size: int, *,
+                label: str) -> tuple[list, dict]:
+    """按 RUNTIME_FUNCTION 数组解析一段原始字节，返回 (bounds, info)。"""
+    warnings: list = []
+    blob = pe.read_off(raw_ptr, raw_size)
+    image_size = max([s.virtual_address + (s.virtual_size or s.raw_size)
+                      for s in pe.sections] or [0])
     n, rem = divmod(len(blob), RUNTIME_FUNCTION_SIZE)
     if rem:
         warnings.append(
-            f'{sec.name}: 原始大小 0x{sec.raw_size:X} 不是 {RUNTIME_FUNCTION_SIZE} 的整数倍，'
+            f'{label}: 大小 0x{raw_size:X} 不是 {RUNTIME_FUNCTION_SIZE} 的整数倍，'
             f'尾部 {rem} B 是残缺条目（已显式报告，不再静默丢弃）')
-
-    # UnwindInfoAddress 是 **RVA**（指向 .rdata/.xdata 里的展开信息）；旧实现解包后
-    # 直接扔掉，这里用它做一次范围校验。
-    image_size = max([s.virtual_address + (s.virtual_size or s.raw_size)
-                      for s in pe.sections] or [0])
 
     bounds, zero, malformed, unwind_bad = [], 0, 0, 0
     for i in range(n):
@@ -145,31 +144,103 @@ def parse_pdata(pe: pe_utils.PEFile, *, section_name: str = '.pdata') -> Functio
         bounds.append(FunctionBound(start, end, unwind, in_image))
 
     if zero:
-        warnings.append(f'跳过 {zero} 条 start==0 的空条目')
+        warnings.append(f'{label}: 跳过 {zero} 条 start==0 的空条目')
     if malformed:
-        warnings.append(f'跳过 {malformed} 条 end<=start 的非法条目')
+        warnings.append(f'{label}: 跳过 {malformed} 条 end<=start 的非法条目')
     if unwind_bad:
-        warnings.append(f'{unwind_bad} 条条目的 UnwindInfoAddress 不在映像范围内（可疑）')
+        warnings.append(f'{label}: {unwind_bad} 条条目的 UnwindInfoAddress 不在映像范围内（可疑）')
 
-    info = dict(
-        section=sec.name, rva=sec.virtual_address, raw_size=sec.raw_size,
-        virtual_size=sec.virtual_size, raw_ptr=sec.raw_ptr,
-        slots=n, entries=len(bounds), skipped_zero=zero, skipped_malformed=malformed,
-        unwind_out_of_image=unwind_bad, remainder_bytes=rem, warnings=warnings,
-    )
+    info = dict(source=label, raw_ptr=raw_ptr, raw_size=raw_size, slots=n,
+                entries=len(bounds), skipped_zero=zero, skipped_malformed=malformed,
+                unwind_out_of_image=unwind_bad, remainder_bytes=rem,
+                score=(len(bounds) / n) if n else 0.0, warnings=warnings)
+    return bounds, info
+
+
+def parse_pdata(pe: pe_utils.PEFile, *, section_name: str = '.pdata') -> FunctionBounds:
+    """解析函数边界表（RUNTIME_FUNCTION 数组）。
+
+    ★ 必须优先读**异常目录**（数据目录[3]），而不是按名字找 `.pdata` 段：
+    这版原神 exe 的 `.pdata` 段是**诱饵**（1,177,301 条里 588,950 条 end<=start，
+    且找不到任何真实函数起点），真正的表被搬到了 `.upx0` 里，只有异常目录指向它
+    （实测 RVA 0x19F73B00 / 0xD796B8 字节 / 1,177,402 条，全部合法且单调有序）。
+    读错表的后果很隐蔽：函数边界全错 → 指纹截断错 → 跨版本迁移匹配不到或误匹配。
+    所以这里两个来源都解析，按「合法条目占比」选可信的那个，并把另一个的分数写进 warnings。
+    """
+    candidates = []
+
+    # ① 异常目录（正道）
+    try:
+        dd = pe.pe.OPTIONAL_HEADER.DATA_DIRECTORY[EXCEPTION_DIRECTORY_INDEX]
+        dd_rva, dd_size = int(dd.VirtualAddress), int(dd.Size)
+    except (AttributeError, IndexError):          # pragma: no cover - 没有数据目录的畸形 PE
+        dd_rva, dd_size = 0, 0
+    if dd_rva and dd_size >= RUNTIME_FUNCTION_SIZE:
+        try:
+            off = pe.rva_to_off(dd_rva, dd_size)
+            bounds, info = _scan_table(pe, off, dd_size, label='异常目录')
+            info['rva'] = dd_rva
+            candidates.append((bounds, info))
+        except (pe_utils.RvaError, pe_utils.PEFormatError) as exc:
+            candidates.append(([], dict(source='异常目录', score=0.0, slots=0, entries=0,
+                                        rva=dd_rva,
+                                        warnings=[f'异常目录不可用：{exc}'])))
+
+    # ② .pdata 段（★ 可能是诱饵，只在分数更高时才采信）
+    sec = pe.find_section(section_name)
+    if sec is not None and sec.raw_size:
+        bounds, info = _scan_table(pe, sec.raw_ptr, sec.raw_size, label=sec.name)
+        info['rva'] = sec.virtual_address
+        info['virtual_size'] = sec.virtual_size
+        if sec.virtual_size and sec.virtual_size < sec.raw_size:
+            info['warnings'].append(
+                f'{sec.name}: VirtualSize 0x{sec.virtual_size:X} < SizeOfRawData 0x{sec.raw_size:X}，'
+                f'本次按**原始大小**全量解析（旧实现用 min() 会静默丢掉尾部条目）')
+        candidates.append((bounds, info))
+
+    if not candidates:
+        raise pe_utils.PEFormatError(
+            f'{pe.path}: 既没有异常目录也没有 {section_name} 段，无法得到函数边界')
+
+    candidates.sort(key=lambda c: c[1]['score'], reverse=True)
+    bounds, info = candidates[0]
+    if not bounds:
+        raise pe_utils.PEFormatError(
+            f'{pe.path}: 两个来源都解析不出合法函数条目（'
+            + '；'.join(f'{c[1]["source"]} score={c[1]["score"]:.2f}' for c in candidates) + '）')
+
+    warnings = list(info['warnings'])
+    for other_bounds, other in candidates[1:]:
+        if other['source'] != info['source']:
+            warnings.append(
+                f'{other["source"]} 只有 {other["entries"]:,} 条合法条目（合法率 '
+                f'{other["score"]:.0%}，共 {other["slots"]:,} 槽位）→ 未采用'
+                + ('（这版 exe 的该来源是诱饵）' if other['score'] < 0.5 else ''))
+            # 只有「这个来源彻底用不了」（0 条合法条目，例如异常目录指向段外）才把它的
+            # 逐条警告带出来；诱饵那种"能解析但分数低"的情况只留上面一行摘要，免得刷屏。
+            if not other['entries']:
+                warnings.extend(w for w in other.get('warnings', []) if w not in warnings)
+    info['warnings'] = warnings
+    info['source_rva'] = info.get('rva', 0)
     return FunctionBounds(bounds, info=info)
 
 
 def load_function_bounds(pe: pe_utils.PEFile, *, required: bool = False) -> Optional[FunctionBounds]:
     """给 align_class / migrate_masked 用的入口。
 
-    required=False（默认）时，没有 .pdata 就返回 None 并让调用方自己决定降级策略
+    ★ 有**异常目录**就算有边界（这版 exe 真正的表在那里，`.pdata` 段是诱饵）。
+    required=False（默认）时，两者都没有就返回 None 并让调用方自己决定降级策略
     （降级必须在输出里写清楚）。required=True 时直接抛 PEFormatError。
     """
-    if pe.find_section('.pdata') is None:
+    try:
+        dd = pe.pe.OPTIONAL_HEADER.DATA_DIRECTORY[EXCEPTION_DIRECTORY_INDEX]
+        has_exc = int(dd.VirtualAddress) != 0 and int(dd.Size) >= RUNTIME_FUNCTION_SIZE
+    except (AttributeError, IndexError):          # pragma: no cover
+        has_exc = False
+    if not has_exc and pe.find_section('.pdata') is None:
         if required:
             raise pe_utils.PEFormatError(
-                f'{pe.path}: 没有 .pdata 段，无法得到函数边界；'
+                f'{pe.path}: 既没有异常目录也没有 .pdata 段，无法得到函数边界；'
                 f'现有段: {", ".join(pe.section_names)}')
         return None
     return parse_pdata(pe)
@@ -177,7 +248,7 @@ def load_function_bounds(pe: pe_utils.PEFile, *, required: bool = False) -> Opti
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description='解析 .pdata 函数边界（也给 align_class / migrate_masked 复用）')
+        description='解析函数边界表（优先异常目录；.pdata 段可能是诱饵）')
     ap.add_argument('--exe', required=True)
     ap.add_argument('--near', default='', help='锚点 RVA，逗号分隔')
     ap.add_argument('--span', type=pe_utils.parse_int, default=0x1800)
@@ -192,24 +263,22 @@ def main() -> int:
     except (pe_utils.PEFormatError, OSError) as exc:
         print(f'错误：无法加载 PE：{exc}', file=sys.stderr)
         return EXIT_PARAM
-    if pe.find_section('.pdata') is None:
-        print(f'错误：{a.exe} 没有 .pdata 段；现有段: {", ".join(pe.section_names)}',
-              file=sys.stderr)
-        return EXIT_PARAM
     try:
-        fb = parse_pdata(pe)
+        fb = load_function_bounds(pe, required=True)
     except pe_utils.PEFormatError as exc:
         print(f'错误：{exc}', file=sys.stderr)
         return EXIT_PARAM
 
     out = dict(exe=a.exe, image_base=pe.image_base, pdata=fb.info, functions=[])
     if not a.json:
-        print(f'{a.exe}\n  .pdata 函数条目: {len(fb):,} / 槽位 {fb.info["slots"]:,}')
+        src, srv = fb.info.get('source', '?'), fb.info.get('rva', 0)
+        print(f'{a.exe}\n  边界表来源: {src}（RVA 0x{srv:X}）')
+        print(f'  函数条目: {len(fb):,} / 槽位 {fb.info["slots"]:,}')
         for w in fb.warnings:
             print(f'  ⚠ {w}')
 
     if len(fb) == 0:
-        print('错误：.pdata 里没有任何有效函数条目', file=sys.stderr)
+        print('错误：边界表里没有任何有效函数条目', file=sys.stderr)
         if a.json:
             pe_utils.emit_json(out)
         return EXIT_EMPTY

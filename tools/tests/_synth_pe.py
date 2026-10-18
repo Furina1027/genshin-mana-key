@@ -36,7 +36,8 @@ def _align(value: int, alignment: int) -> int:
 
 
 def build_pe(sections, *, image_base: int = 0x140000000, file_align: int = 0x200,
-             sect_align: int = 0x1000, entry_rva: int = 0) -> bytes:
+             sect_align: int = 0x1000, entry_rva: int = 0,
+             data_directories: dict | None = None) -> bytes:
     """按规格拼一个最小 PE32+ 文件（返回完整字节）。
 
     sections 里每个元素：
@@ -46,6 +47,8 @@ def build_pe(sections, *, image_base: int = 0x140000000, file_align: int = 0x200
       vsize 可选，Misc_VirtualSize（默认 == len(data)；显式给大于 raw 的值可以
             构造出「只有内存里有、文件里没有字节」的虚拟尾部，这正是要测的越界场景）
       chars 段特征位
+      data_directories 可选，{目录索引: (RVA, 字节大小)}；例如 {3: (0x2000, 24)} 指定
+            异常目录指向的函数边界表。不传则 16 个目录全 0（旧行为）。
     """
     if not sections:
         raise ValueError('至少要一个段')
@@ -115,7 +118,11 @@ def build_pe(sections, *, image_base: int = 0x140000000, file_align: int = 0x200
         off += struct.calcsize(fmt)
     if off != 0x40 + 4 + 20 + 112:
         raise AssertionError(f'optional header 长度异常: {off:#x}')
-    off += 16 * 8                            # 数据目录（全 0）
+    off += 16 * 8                            # 数据目录（默认全 0，随后按需覆盖）
+    for idx, (dd_rva, dd_size) in (data_directories or {}).items():
+        if not 0 <= int(idx) < 16:
+            raise ValueError(f'数据目录索引越界: {idx}')
+        struct.pack_into('<II', out, off - 16 * 8 + int(idx) * 8, int(dd_rva), int(dd_size))
     assert off == 0x40 + 4 + 20 + OPTIONAL_HEADER_SIZE
 
     # ---- Section headers ----
