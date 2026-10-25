@@ -3,13 +3,9 @@
 # 安装：
 #   pip install -r tools/requirements.txt
 #
-# 注意：这些脚本都做了「可选依赖缺失时中文提示并非 0 退出」的降级处理，
-# 但要让整条 RVA 定位链真正跑通，下面四个是必需的。
+# tools/ 现在只有「版本迁移四件套」（update_rva / migrate_masked / pdata / pe_utils），
+# USM 解密与调查类脚本已删除（2026-10-25 瘦身：本项目只做抓 key，不做验证/解密；
+# USM 解析在 genshin-video-keys 里有独立实现）。
 
-capstone==5.0.7        # 反汇编（dump_rva / align_class / migrate_masked / xref / locate_hooks）
-pefile==2023.2.7       # PE 解析（pe_utils 及全部 PE 脚本）
-numpy==2.2.3           # 向量化扫描（find_methptr / table_scan / xref / align_class）
-pycryptodome==3.17     # AES-128-CTR 视频解密（usm.py / usm_stream_extract.py）
-
-# --- 可选依赖：不装也能跑，AES 会退回到 pycryptodome 的实现 ---
-# cryptography==43.0.1 # 仅当没有 pycryptodome 时作为 AES-ECB 退路（usm.py 的 _ecb_backend）
+capstone==5.0.7        # 反汇编（migrate_masked 的掩码指纹）
+pefile==2023.2.7       # PE 解析（pe_utils）

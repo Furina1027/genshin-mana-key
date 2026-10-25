@@ -58,7 +58,7 @@ jobs:
       - name: Every CLI tool must expose --help
         shell: pwsh
         run: |
-          # 只对「有 CLI 的脚本」冒烟：pe_utils.py / usm.py 是共享库模块，没有 argparse
+          # 只对「有 CLI 的脚本」冒烟：pe_utils.py 是共享库模块，没有 argparse
           $failed = @()
           $skipped = @()
           Get-ChildItem tools/*.py | ForEach-Object {

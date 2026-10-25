@@ -356,10 +356,9 @@ CI 见 `.github/workflows/ci.yml`：两个项目要求 **0 警告**构建、跑�
 
 两个与 CI 环境有关的坑（都已在配置里处理）：
 
-- **可选依赖缺失要跳过，不能算失败**：`scipy`（`align_class.py` 的全局最优匹配）和
-  `cryptography`（`usm.py` 在没有 pycryptodome 时的 AES 退路）都是**可选**依赖，
-  而 CI 只装 `tools/requirements.txt` 里那四个固定依赖 —— 所以相关用例用
-  `skipUnless` 按需跳过，并**补了一条"没有 scipy 时走退化匹配"的用例**（本机装了 scipy 就跳过、
+- （历史）可选依赖跳过逻辑属于已删除的 `align_class.py` / `usm.py` ——
+  2026-10-25 瘦身后 `tools/` 只剩版本迁移四件套（update_rva / migrate_masked /
+  pdata / pe_utils），依赖也只有 capstone / pefile 两个。
   CI 里跑），保证两条路径都有人看着。
 - **`PYTHONIOENCODING=utf-8`**：GitHub 的 Windows runner 控制台代码页是 cp1252，
   这些脚本的 `--help` 又是中文；Python 对管道里的 stdout 用严格编码，会直接
@@ -392,14 +391,15 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 
 工程化约定（为了能脚本化/进 CI）：
 
-- 依赖固定在 `tools/requirements.txt`（capstone / pefile / numpy / pycryptodome）。
+- 依赖固定在 `tools/requirements.txt`（capstone / pefile）。
 - PE 加载与 RVA→文件偏移映射统一走 `tools/pe_utils.py`（**越界即抛**，不再用
-  `max(VirtualSize, SizeOfRawData)` 那种会接受越界 RVA 的不可靠映射）；
-  USM 解析统一走 `tools/usm.py`（只有一份 `parse_chunks`）。
+  `max(VirtualSize, SizeOfRawData)` 那种会接受越界 RVA 的不可靠映射）。
+- （USM 解析脚本已于 2026-10-25 随瘦身删除 —— 密钥直接从游戏内存读出，
+  无需解密验证；离线解密/验证工具在 `../genshin-video-keys`。）
 - 所有脚本：`main()` 返回 int + `raise SystemExit(main())`，**定位失败返回非 0**；
   加 `--json` 便于脚本消费；`--help` 一律可用。
 - 脚本自身的单测在 `tools/tests/`（`python -m unittest discover -s tools/tests -v`），
-  包含合成 USM 的解密往返（含第一个 chunk 的偏移陷阱）、PE RVA 越界、CTR 计数器等价性。
+  覆盖 PE RVA 越界、`.pdata` 边界解析、update_rva 的读写回源码约定。
 
 ## 目录
 
@@ -408,7 +408,7 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 ├── launcher/  启动器（挂起拉起 + 注入 + 配对写 paired_keys.json），NativeAOT
 ├── run/       ManaKeyDumper.exe/dll + 产物
 ├── tests/     启动器纯逻辑单测（配对状态机 + 密钥库读写，xunit）
-└── tools/     自研 RVA 定位 / 引用分析 / USM 结构脚本（Python + capstone/pefile）
+└── tools/     版本迁移四件套：update_rva / migrate_masked / pdata / pe_utils（Python + capstone/pefile）
 ```
 
 ---
