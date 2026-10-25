@@ -351,19 +351,12 @@ dotnet test tests\ManaKeyDumper.Tests\ManaKeyDumper.Tests.csproj
 python -m unittest discover -s tools/tests -v
 ```
 
-CI 见 `.github/workflows/ci.yml`：两个项目要求 **0 警告**构建、跑上面的单测，
-并对 `tools/` 做依赖固定安装 + 逐脚本 `--help` 冒烟。
+（远程 CI 已于 2026-10-25 移除 —— 个人仓库用不上，本地测试已覆盖同样内容；
+历史配置见 git。提交前建议本地跑一遍上面两条测试命令。）
 
-两个与 CI 环境有关的坑（都已在配置里处理）：
-
-- （历史）可选依赖跳过逻辑属于已删除的 `align_class.py` / `usm.py` ——
-  2026-10-25 瘦身后 `tools/` 只剩版本迁移四件套（update_rva / migrate_masked /
-  pdata / pe_utils），依赖也只有 capstone / pefile 两个。
-  CI 里跑），保证两条路径都有人看着。
-- **`PYTHONIOENCODING=utf-8`**：GitHub 的 Windows runner 控制台代码页是 cp1252，
-  这些脚本的 `--help` 又是中文；Python 对管道里的 stdout 用严格编码，会直接
-  `UnicodeEncodeError` 非 0 退出。CI 给 python 任务统一设了这个变量（见 ci.yml 注释）；
-  你本机若在非中文代码页的控制台里跑，同理 `chcp 65001` 或 `set PYTHONIOENCODING=utf-8`。
+一个编码坑（原 CI 配置里处理过的，本机同样适用）：在非中文代码页的控制台里，
+这些脚本的中文 `--help` 会因 Python 对管道 stdout 用严格编码而
+`UnicodeEncodeError` 非 0 退出 —— `chcp 65001` 或 `set PYTHONIOENCODING=utf-8` 即可。
 
 NativeAOT 编译若报 `LNK1181 ... .lib`，是 MSVC 库路径没进环境变量，需显式：
 
