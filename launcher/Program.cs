@@ -333,27 +333,22 @@ internal static class Program {
     private static void WritePairingEntry(PairingEntry entry) {
         try {
             if (entry.Kind == PairingKind.Aes) {
-                // BCKEY 通路（bcrypt）：只有视频 AES 密钥，音频 key 拿不到 —— 不写空字段
+                // BCKEY 通路（bcrypt）：这是 7.x 唯一会真正触发的密钥来源
                 JsonStore.UpsertAes(Paths.PairedKeys, entry.File, entry.Aes);
                 Log.Pair($"★★ 已配对(视频 AES) {entry.File} → paired_keys.json (aes={entry.Aes})");
-            } else if (entry.Kind == PairingKind.Method2) {
-                JsonStore.UpsertMethod2(Paths.PairedKeys, entry.File, entry.Aes, entry.Audio);
-                Log.Pair($"★★ 已配对 {entry.File} → paired_keys.json (aes={Head(entry.Aes)}… audio={Head(entry.Audio)}…)");
+                Interlocked.Increment(ref _pairedCount);
             } else {
-                JsonStore.UpsertMask(Paths.PairedKeys, entry.File, entry.VideoKey);
-                Log.Pair($"★★ 已配对(掩码) {entry.File} → paired_keys.json ({entry.VideoKey})");
+                // 旧体系（掩码 / method2）的钩子已在 v20 随诊断一起删除，正常不会再产生这类上报；
+                // KeyPairing 保留解析只是为了协议兼容，这里明确不入库（paired_keys.json 只存 文件名+aes）。
+                Log.Warn($"忽略旧体系密钥上报（{entry.Kind}）{entry.File}：v20 起只入库 BCKEY 的视频 AES");
             }
-            // 这三行走 Log.Pair：**只有它们会上遮罩**，其余日志（含下面那些诊断）只进 dumper.log。
+            // 配对行走 Log.Pair：**只有它们会上遮罩**，其余日志（含诊断）只进 dumper.log。
             // 为什么只留这一行：遮罩贴在游戏画面上，管道诊断几十行没人会看，
             // 真正要一眼确认的只有"这个视频配上密钥了没有"。
-            Interlocked.Increment(ref _pairedCount);
         } catch (Exception e) {
             Log.Error($"写 paired_keys.json 失败: {e.Message}");
         }
     }
-
-    /// <summary>日志里只显示密钥前 8 个字符：足够核对，又不必把整库密钥打到屏幕上。</summary>
-    private static string Head(string value) => value.Length <= 8 ? value : value[..8];
 
     private static string DescribeInjectionError(Exception? error) {
         if (error is Win32Exception win32) {

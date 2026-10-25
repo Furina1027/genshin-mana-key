@@ -5,11 +5,21 @@ using System.Text.Json;
 namespace GenshinSniffer;
 
 /// <summary>
-/// paired_keys.json 的最小 KV 存储（NativeAOT 安全的无反射用法）。
+/// paired_keys.json 的存储（NativeAOT 安全的无反射用法）。
 ///
-/// 值保持两种形态（与 hoyo-files key 库直接兼容）：
-///   { "文件名": "掩码hex" }                          ← 4.4 掩码体系
-///   { "文件名": {"aes":"..","audio":".."} }          ← 4.5 method2(AES_HCA)
+/// 文件形态（**缩进美化**，可直接人工查阅）：
+///   {
+///     "Cs_ZD_AQ70201201_SLT": {
+///       "aes": "F5AC17FFE4B4B430553AE073EB8A8A1D"
+///     },
+///     "Video_Reunion_71": {
+///       "aes": "52110EFF32D786123DE8579E872BB28D"
+///     }
+///   }
+///
+/// v20 起只收 BCKEY（bcrypt 通路）的视频 AES 密钥 —— 文件名 + aes，就这两样。
+/// 旧掩码体系（4.4 裸字符串）与 method2 体系（{"aes":..,"audio":..}）的钩子已删除，
+/// 读取时遇到这些旧形态：method2 的 aes 照收（仍是有效的视频密钥），掩码跳过（密钥类型不同，收了也是错的）。
 ///
 /// 为什么不用 JsonSerializer：反射序列化在 NativeAOT 下要么需要源生成器、要么被裁剪掉，
 /// 这里只保留 JsonDocument（读）+ Utf8JsonWriter（写），IL 上完全静态可达。
@@ -24,7 +34,7 @@ internal static class JsonStore {
     private const string TempInfix = ".tmp-";
 
     /// <summary>
-    /// 读取现有文件为 name -> 原始 JSON 值文本（字符串值**含引号**，与文件里的文本一致）。
+    /// 读取现有文件为 文件名 → aes（十六进制大写）。非 aes 形态的旧条目跳过；
     /// 损坏时不覆盖不丢弃：原文件改名备份成 path + ".corrupt-" + 时间戳，从空表继续。
     /// </summary>
     public static Dictionary<string, string> Load(string path) {
@@ -49,8 +59,12 @@ internal static class JsonStore {
                 throw new JsonException($"根节点是 {doc.RootElement.ValueKind}，不是 JSON 对象");
             }
             foreach (var prop in doc.RootElement.EnumerateObject()) {
-                // GetRawText() 就是文件里的原始值文本 → 原样回写不会二次转义（旧实现读时不反转义，会逐次膨胀）
-                dict[prop.Name] = prop.Value.GetRawText();
+                // 只认 { "aes": "hex" }；旧掩码（裸字符串）与无 aes 的对象不是视频 AES，跳过不污染
+                if (prop.Value.ValueKind == JsonValueKind.Object
+                    && prop.Value.TryGetProperty("aes", out var aes)
+                    && aes.ValueKind == JsonValueKind.String) {
+                    dict[prop.Name] = aes.GetString() ?? "";
+                }
             }
             return dict;
         } catch (JsonException e) {
@@ -59,39 +73,10 @@ internal static class JsonStore {
         }
     }
 
-    /// <summary>4.5 method2：{ "文件名": {"aes":"..","audio":".."} }。</summary>
-    public static void UpsertMethod2(string path, string name, string aes, string audio) {
-        var dict = Load(path);
-        dict[name] = BuildValueText(w => {
-            w.WriteStartObject();
-            w.WriteString("aes", aes);
-            w.WriteString("audio", audio);
-            w.WriteEndObject();
-        });
-        Write(path, dict);
-    }
-
-    /// <summary>
-    /// 仅视频 AES 密钥：{ "文件名": {"aes":".."} }。
-    ///
-    /// 为什么不像 method2 那样写空 audio：BCKEY（bcrypt 通路）只拿得到视频密钥，
-    /// 音频 key 属于那 4 个 MANAKEY* 钩子（实测 0 次调用）。写 `"audio":""` 等于对下游
-    /// 宣称"音频 key 是空字符串"，会把一条错记录带进 key 库；不如干脆不写这个字段。
-    /// </summary>
+    /// <summary>入库一条视频 AES 密钥（BCKEY 通路）。同名覆盖（同视频换钥以最后一次为准）。</summary>
     public static void UpsertAes(string path, string name, string aes) {
         var dict = Load(path);
-        dict[name] = BuildValueText(w => {
-            w.WriteStartObject();
-            w.WriteString("aes", aes);
-            w.WriteEndObject();
-        });
-        Write(path, dict);
-    }
-
-    /// <summary>4.4 掩码：{ "文件名": "videoKeyHex" }。</summary>
-    public static void UpsertMask(string path, string name, string videoKey) {
-        var dict = Load(path);
-        dict[name] = BuildValueText(w => w.WriteStringValue(videoKey));
+        dict[name] = aes;
         Write(path, dict);
     }
 
@@ -117,15 +102,6 @@ internal static class JsonStore {
         Log.Warn($"★ {Path.GetFileName(path)} 内容损坏（{cause.Message}），原文件已备份为 {Path.GetFileName(backup)}，本次从空表继续。");
     }
 
-    /// <summary>用 Utf8JsonWriter 生成一段规范 JSON 值文本（转义/控制字符都由 writer 保证合法）。</summary>
-    private static string BuildValueText(Action<Utf8JsonWriter> write) {
-        using var ms = new MemoryStream();
-        using (var w = new Utf8JsonWriter(ms)) {
-            write(w);
-        }
-        return Encoding.UTF8.GetString(ms.ToArray());
-    }
-
     /// <summary>
     /// 原子写：同目录临时文件 → 落盘 → File.Move(overwrite: true)。
     /// 临时文件必须与目标同目录（同一卷），跨卷的 Move 会退化成"复制 + 删除"，就不是原子的了。
@@ -137,12 +113,12 @@ internal static class JsonStore {
         var tmp = full + TempInfix + Guid.NewGuid().ToString("N")[..8];
         try {
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None)) {
-                using (var w = new Utf8JsonWriter(fs)) {
+                using (var w = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true })) {
                     w.WriteStartObject();
                     foreach (var kv in dict) {
-                        w.WritePropertyName(kv.Key);
-                        // 值按原始 JSON 文本回写：字符串值连引号一起保留，反复读写不会逐次加转义
-                        w.WriteRawValue(kv.Value);
+                        w.WriteStartObject(kv.Key);
+                        w.WriteString("aes", kv.Value);
+                        w.WriteEndObject();
                     }
                     w.WriteEndObject();
                 }

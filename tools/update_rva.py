@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""update_rva.py — 游戏更新后，把 5 个钩子 RVA 自动迁移到新 exe 并写回源码。
+"""update_rva.py — 游戏更新后，把钩子 RVA 自动迁移到新 exe 并写回源码。
 
 双击 `update_rva.cmd` 就会调用本脚本。它做的事：
 
@@ -12,6 +12,13 @@
   5. 多个候选时，用"同一个类整体平移量一致"消歧（只有和 NF 的位移差在 ±0x20000 内才认）；
   6. 表格确认后写回源码（自动备份 `Application.cs`），可选接着跑 `build.bat`；
   7. 把新 exe 缓存到 `rva_cache\\`，下次更新就有"旧 exe"可用。
+
+v20 起源码里只剩 1 个 il2cpp RVA（NativeSetFile，文件名来源）——诊断钩子已随
+2026-10 的清理一起删除，本脚本的迁移清单也缩到 1 项。
+
+提示：NF 的真名是 `CriWare.CriMana.Player.NativeMethods_SetFile`（CRI 包装类不受
+混淆影响）。genshin-metadata 项目的 `cn/out/methods.csv` 有全量 名字→RVA 表，
+可以直接按名直读新版本的 RVA，再用本脚本的结果做交叉校验。
 
 用法：
   python tools\\update_rva.py                      # 交互（双击 cmd 就是这个）
@@ -60,12 +67,9 @@ FINGERPRINT_INSNS = 28
 MIN_ANCHOR = 6
 MAX_HITS = 12
 
-# 只在两边都能定位时才迁移；顺序很重要：NF 先跑，因为它的位移是消歧基准
-FUNCTION_ORDER = ['NativeSetFile', 'ManagedSetFile', 'SetVideoAudioKeys',
-                  'SetVideoAesKeyAudio', 'NativeSetVideoAudioKeys',
-                  'NativeSetVideoAesKeyAudio', 'Unk5', 'Unk6', 'KeyFeed',
-                  'DecrypterInitConfig', 'DecrypterInit2', 'DecrypterNative',
-                  'PluginSetConfigParams', 'PluginSetConfigAdditional']
+# v20 起源码里只剩这一个 il2cpp RVA（诊断钩子已删除）。保留列表形式：
+# 以后若新增钩子，往这里加名字（必须与 Application.cs RvaSet 的字段名一致）即可。
+FUNCTION_ORDER = ['NativeSetFile']
 
 BLOCK_RE = re.compile(
     r'(?s)(private static readonly RvaSet (?P<which>Cn|Gl) = new\(\) \{)(?P<body>.*?)(\n    \};)')

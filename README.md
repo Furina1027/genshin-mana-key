@@ -33,14 +33,14 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 | 钩子 | 方法 | 国服 YuanShen.exe | 国际服 GenshinImpact.exe | 默认挂 |
 |---|---|---|---|---|
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一）** |
-| S2 | `SetVideoAudioDecryptionKeys(ulong videoKey, ulong audioKey)` | `0x070546F0` | `0x070515D0` | 否（仅 `GMK_FULL=1`） |
-| S3 | `SetVideoAesKeyAudioDecryptionKey(byte[] aesKey, ulong audioKey)` | `0x070548F0` | `0x070517D0` | 否（仅 `GMK_FULL=1`） |
-| N2 | `NativeMethods_SetVideoAudioDecryptionKeys(int, ulong, ulong)` | `0x070547F0` | `0x070516D0` | 否（仅 `GMK_FULL=1`） |
-| N3 | `NativeMethods_SetVideoAesKeyAudioDecryptionKey(int, byte[], ulong)` | `0x07054A70` | `0x07051950` | 否（仅 `GMK_FULL=1`） |
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）** |
+| — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **key 本体**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
+| — | `bcrypt.dll!BCryptEncrypt` → 密钥流验证（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 
-> **默认运行只挂 NF 这一个 il2cpp 钩子。** S2/S3/N2/N3 的 RVA 仍然内置，但实测整场游戏
-> **0 次调用**（见下面「实际起作用的钩子」），只在 `GMK_FULL=1` 时才挂出来做诊断。
+> **v20（2026-10-24）起诊断钩子全部删除。** 原有的 S2/S3/N2/N3 四个 MANAKEY 钩子与
+> 9 个 GMK_FULL 侦察钩子实测（2026-10-16 多轮日志）要么 0 次调用、要么只服务逆向调查，
+> 却每个版本都要迁移 RVA —— 已从源码移除（历史代码与 RVA 见 git，v19 及之前）。
+> il2cpp 补丁面积恒为 1，`GMK_FULL` 开关随之取消。
 >
 > ⚠️ 与崩铁的关键差异：原神的 IL2CPP 代码**在 exe 里**（`il2cpp` 段），
 > **没有 GameAssembly.dll**；而且 exe **不导出任何 il2cpp_\* API**（只有 4 个导出）。
@@ -48,8 +48,6 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 > 📌 两套 RVA 已内置在 `inject/src/Application.cs` 的 `Cn` / `Gl` 常量集里，按主模块名
 > （`YuanShen.exe` / `GenshinImpact.exe`）自动选择，日志会打印「生效 RVA 常量集 = …」。
-> **国际服只有上表这 5 个 MANAKEY/文件名 RVA 有依据**；其余诊断项没有交叉验证过的值，一律写 0 并跳过
-> （日志里是 `[skip] … RVA=0（按设计跳过）`）—— 不拿猜测值去挂钩。
 >
 > 挂钩前会用 exe 自己的 PE 节表校验 RVA 落在**可执行节**内、地址可读、序言合法；
 > 任一步不过就跳过并打印「RVA 可能已过期」。游戏更新后 RVA 失效时，是"少挂钩"而不是"崩游戏"。
@@ -70,7 +68,8 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 `run/mana_keys.log` 里也只有两种行：`BCKEY` + `MANAFILE` —— 这是"只有这两个钩子在生产"的直接证据。
 
 **所以默认运行只需要**：`bcrypt.dll` 的 2 个导出钩子（key + 验证）+ 1 个 il2cpp 钩子（文件名）。
-v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`（`AttachManaKeyHooks`），默认 il2cpp 补丁面积 **5 → 1**。
+v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`，默认 il2cpp 补丁面积 **5 → 1**；
+**v20 起诊断钩子彻底删除**（`AttachManaKeyHooks`/`AttachDiagnostics` 等已从源码移除），补丁面积恒为 1。
 
 **这些 RVA 是怎么核对的**：`cn/out` 的 dump.cs 只有方法索引、没有 RVA，所以拿
 `genshin-metadata/global/out/methods_r.csv`（国际服 7.1 全量 idx→RVA）当参照 —— 两服同一份源码、
@@ -79,6 +78,9 @@ v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`（`AttachManaKeyHooks`），默认 il2
 两者相隔 33 个方法、位移都是 `0x3120`），再反查全部常量：S2/S3/N2/N3 分别命中
 `SetVideoAudioDecryptionKeys` / `SetVideoAesKeyAudioDecryptionKey` / 两个 `NativeMethods_*` 包装 ——
 6 个常量全中、无一落空。
+（2026-10-24 复核：`genshin-metadata/cn/out/methods.csv` 与当时全部 14 个常量机器核对，
+14/14 可按名解析、8 个命名钩子逐一精确一致 —— 这也是"按名直读 RVA"方案的可行性证明，
+见下文「版本更新」。）
 
 > ⚠️ 别用"按 `.pdata` 槽位顺序对齐"或"暴力找 methodPointer 表基址"这两种做法：类内方法之间夹着
 > 非方法函数（adjustor thunk 之类），槽位会整体串位。这两种都试过并失败，上面的证据就是反例。
@@ -94,13 +96,20 @@ v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`（`AttachManaKeyHooks`），默认 il2
 
 1. 它自己找新 exe（`run\game_path.txt` → 游戏目录；拖拽/参数优先）；
 2. 拿 `rva_cache\<exe名>` 里缓存的**上一版 exe** 当参照（脚本每次成功后自动缓存，所以这个目录别删）；
-3. 从 `inject\src\Application.cs` 读出当前常量当"旧 RVA"，用掩码指纹逐个迁到新 exe；
+3. 从 `inject\src\Application.cs` 读出当前常量当"旧 RVA"，用掩码指纹迁到新 exe
+   （v20 起清单只有 NF 一项）；
 4. 打印 旧→新 对照表：**只采信唯一命中**；不唯一的会把候选列出来让你选（绝不自动猜）；
 5. **没迁上的常量会写成 `0`** —— C# 侧的约定是"0 = 该服务器未定位此钩子 → 跳过并打日志"，
    比留着旧 RVA 安全（旧 RVA 在新版本里仍可能通过"可执行节+可读+序言"三项校验，
    于是把补丁打到别的函数上，错得不声不响）。旧值可在 `.bak-<时间戳>` 备份里找回；
-   唯一例外是 `NativeSetFile`（默认运行的关键项）：它没迁上就**什么都不写**并以非 0 退出；
+   `NativeSetFile` 是唯一的关键项：它没迁上就**什么都不写**并以非 0 退出；
 6. 确认后写回源码（自动备份 `Application.cs.bak-<时间戳>`），可选接着跑 `build.bat`。
+
+> **交叉校验（推荐）**：NF 的真名 `CriWare.CriMana.Player.NativeMethods_SetFile` 不受混淆影响
+> （CRI 包装类保留原名）。用 [genshin-metadata](../../genshin-metadata/) 项目对新客户端跑一次
+> `python build.py`（约 5 分钟，自动推导 key + 生成 `methods.csv`），就能**按名直读**新 RVA ——
+> 与指纹迁移的结果必须一致，不一致就是哪一个都别信。
+> 全部 14 个历史钩子的真名对照（2026-10-24 机器核对）已在 git 历史与 genshin-metadata 分析中留档。
 
 ```powershell
 update_rva.cmd                 # 双击等价：问一句就写
@@ -129,8 +138,7 @@ update_rva.cmd --force         # 旧/新 exe 完全相同也照跑（默认认�
 
 ```powershell
 python tools\migrate_masked.py --src <旧exe> --dst <新exe> `
-    --rva NF=0x070538C0 --rva S2=0x070546F0 --rva S3=0x070548F0 `
-    --rva N2=0x070547F0 --rva N3=0x07054A70 --dis
+    --rva NF=0x070538C0 --dis
 ```
 
 判据（工具自己会卡死这些）：
@@ -172,14 +180,15 @@ RVA `0x19F73B00` / `0xD796B8` 字节 / 1,177,402 条，全部合法且单调有�
 - 暴力搜 methodPointer 表基址再按全局索引读 —— 这张表按程序集分成多段（最大的 460,313 项），
   没有程序集边界就对不上全局索引。
 
-## 钩子开关（默认只挂核心，诊断要显式打开）
+## 钩子开关（默认只挂核心）
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `GMK_FULL=1` | 关 | 再挂 **13 个诊断钩子**（4 个 MANAKEY（S2/S3/N2/N3）+ 托管 `SetFile` + `CriWareDecrypter`×3 + `CriManaPlugin`×2 + `KeyFeed` + 两个未定性方法）。**会显著扩大 il2cpp 代码补丁面积**；v3 实测大面积补丁会导致视频放不出来，只在定位新密钥来源时开 |
-| `GMK_BC=0` | 开 | 关掉 `bcrypt.dll`（系统库）钩子。默认运行**唯一真正产出密钥**的就是这条路径，所以它不跟诊断钩子一起门控 —— 除非事实证明系统库补丁也影响播放，否则不要关 |
-| `GMK_FS=1` | 关 | 启动 CRI FS 侦察线程。实测该线程会让视频无法播放，仅用于调查 |
+| `GMK_BC=0` | 开 | 关掉 `bcrypt.dll`（系统库）钩子。默认运行**唯一真正产出密钥**的就是这条路径 —— 除非事实证明系统库补丁也影响播放，否则不要关 |
+| `GMK_FS=1` | 关 | 启动 CRI FS 侦察线程。实测该线程会让视频无法播放，仅用于调查（无 RVA 依赖，不参与版本更新） |
 | `GMK_REUSE=1` | 关 | 打开「跨视频复用密钥」的补报。实测每个视频都会自己重建密钥对象并报 `BCKEY`（自带文件名），补报只会在换新钥匙时抢跑误报，仅当某个视频一条 `BCKEY` 都没有时才需要它（见下面「同一把密钥可能覆盖多个视频」） |
+
+（v20 起没有诊断钩子了，`GMK_FULL` 开关已随诊断代码一起删除。）
 
 默认运行 = **1 个 il2cpp 补丁（NF，文件名来源）+ 2 个 bcrypt 导出钩子（取 key + 验签）**。
 
@@ -203,9 +212,10 @@ ManaKeyDumper.exe <游戏目录 或 exe 全路径>   # 显式指定（优先级�
 
 进游戏播放加密过场动画（例：内容组 3003 的 300317-300321）。实时输出两份文件：
 
-- `run\mana_keys.log` — 原始事件（`MANAKEY*` / `MANAFILE*` 行，去重后落盘）
-- `run\paired_keys.json` — **按文件名配对**的密钥（累积写入，可直接并入 key 库）：
-  `{ "文件名": {"aes": "<32hex>", "audio": "<16hex>"} }`
+- `run\mana_keys.log` — 原始事件（`MANAFILE*` / `BCKEY` 行，去重后落盘）
+- `run\paired_keys.json` — **按文件名配对**的密钥（累积写入，缩进美化，可直接并入 key 库）：
+  `{ "文件名": { "aes": "<32hex>" } }`
+  （v20 起只存 BCKEY 的视频 AES —— 文件名 + aes；旧掩码 / method2 体系随钩子一起退役）
 
 四个产物（`mana_keys.log` / `paired_keys.json` / `dumper.log` / `dump\`）全部锚定在 **exe 所在目录**，
 不管从哪个工作目录启动都一样。
