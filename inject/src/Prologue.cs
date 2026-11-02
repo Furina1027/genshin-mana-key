@@ -17,7 +17,9 @@ namespace GenshinSniffer;
 /// 并且它之前**只允许**出现序言前缀字节（push、REX 前缀、endbr64）。
 /// 中段指令要同时凑齐这两条的概率极低。
 ///
-/// 刻意偏严：现网 7.1 国服 14 个钩子的序言全部通过（已用真实 exe 逐个验证，见单测）；
+/// 刻意偏严：v20 现网只剩 1 个 il2cpp 钩子（NF = NativeMethods_SetFile），它的序言在 7.1 国服上
+/// 通过；历史上那 14 个钩子（含已删除的诊断钩子）也逐个用真实 exe 验证过 —— 见单测
+/// <c>PrologueTests</c>（链接本文件源码，跑的就是 DLL 里这段逻辑）。
 /// 将来版本变了若误判，表现是**打日志跳过**而不是改错代码。
 /// </summary>
 internal static class Prologue {

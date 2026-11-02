@@ -16,6 +16,7 @@ internal static class Options {
     private static int _fsWatcher = -1;
     private static int _bcrypt = -1;
     private static int _reuse = -1;
+    private static int _strict = -1;
 
     /// <summary>
     /// GMK_FS=1：启用 CRI FS 侦察线程。默认关 —— 实测只要这个线程存在，视频就无法播放
@@ -48,6 +49,15 @@ internal static class Options {
     /// </summary>
     public static bool KeyReuse => ReadSwitch(ref _reuse, "GMK_REUSE");
 
+    /// <summary>
+    /// <c>GMK_STRICT=1</c>：版本指纹**登记过但与当前 exe 不符**时，主动不挂 NF（默认只警告、照挂）。
+    ///
+    /// 为什么默认不严格：一次正常更新后如果忘了跑 <c>tools\update_rva.cmd</c>，用户至少还能拿到
+    /// key（只是没有文件名归属）；"宁可少挂也不打错补丁"是个需要显式声明的取舍。
+    /// 为什么"未登记"不拦：国际服当前没有指纹，若这里也拦，这个开关会让人一个钩子都挂不上。
+    /// </summary>
+    public static bool StrictVersion => ReadSwitch(ref _strict, "GMK_STRICT");
+
     private static bool ReadSwitch(ref int cache, string name) {
         var value = Volatile.Read(ref cache);
         if (value < 0) {
@@ -70,5 +80,6 @@ internal static class Options {
     /// <summary>启动日志用：把当前生效的开关组合汇总成一行，便于事后对日志。</summary>
     public static string Describe() =>
         $"Options: GMK_FS={(FsWatcher ? 1 : 0)}(FS 侦察线程) " +
-        $"GMK_BC={(BcryptHook ? 1 : 0)}(bcrypt 系统库钩子) GMK_REUSE={(KeyReuse ? 1 : 0)}(跨视频同钥补报,默认关)";
+        $"GMK_BC={(BcryptHook ? 1 : 0)}(bcrypt 系统库钩子) GMK_REUSE={(KeyReuse ? 1 : 0)}(跨视频同钥补报,默认关) " +
+        $"GMK_STRICT={(StrictVersion ? 1 : 0)}(指纹不匹配时不挂 NF,默认关)";
 }

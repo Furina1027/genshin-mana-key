@@ -29,7 +29,11 @@ python tools/tests/test_pdata.py -v
 |---|---|
 | `test_pe_utils.py` | RVA→文件偏移的边界语义：越界必抛、**虚拟尾部（只有内存里有）不许映射**、缺段显式报错 |
 | `test_pdata.py` | `.pdata`/异常目录的函数边界解析：诱饵段按合法占比取信、越界与残余字节显式报告 |
-| `test_update_rva.py` | `update_rva` 的迁移清单读写回源码、SHA 相同即退出、失败写 0 的约定 |
+| `test_update_rva.py` | `update_rva` 的迁移清单读写回源码（8 位十六进制、只改目标常量集、写前必备份）、多候选绝不自动猜、**Fingerprint 字段格式契约与"全部迁成才登记"的决策**、`--old-rva` 解析与拒绝 0/非法值、退出码 3 的语义、**迁移链路不许依赖 numpy** |
+
+`update_rva.main()` 本身需要两代 exe 才能驱动，所以只测它拆出来的纯函数
+（`read_constants` / `write_constants` / `exe_fingerprint` / `plan_fingerprint` /
+`parse_old_rva` / `pick` / `candidates`）；整条流程用合成 PE 做过手工 smoke（不在本目录）。
 
 （USM 与调查类脚本的测试已随脚本一起删除 —— 2026-10-25 瘦身，
 `usm`/`align_class`/`locate_hooks` 等的历史见 git。）

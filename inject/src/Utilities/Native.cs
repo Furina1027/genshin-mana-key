@@ -18,6 +18,30 @@ internal static unsafe partial class Native {
     [LibraryImport("NTDLL.dll", EntryPoint = "RtlGetCurrentPeb")]
     private static partial nint RtlGetCurrentPeb();
 
+    [LibraryImport("KERNEL32.dll", EntryPoint = "GetModuleFileNameW")]
+    private static partial uint GetModuleFileNameW(nint hModule, char* lpFilename, uint nSize);
+
+    /// <summary>
+    /// 本进程 exe 的完整路径（本 DLL 注入在游戏里 → 就是游戏 exe）。
+    ///
+    /// 为什么不用 <see cref="Environment.ProcessPath"/> 一了百了：注入式 NativeAOT DLL 里
+    /// 少一个"框架内部怎么实现"的未知数更稳；这里直接用 KERNEL32 的同名 API。
+    /// 缓冲区给到 1024 个字符（超过 260 的长路径也放得下），被截断时返回 null 让调用方兜底。
+    /// </summary>
+    public static string? GetProcessImagePath() {
+        const int size = 1024;
+        Span<char> buffer = stackalloc char[size];
+        uint length;
+        fixed (char* p = buffer) {
+            length = GetModuleFileNameW(0, p, size);
+        }
+        // length == size = 被截断（API 语义），此时内容不完整，宁可不给
+        if (length is 0 || length >= size) {
+            return null;
+        }
+        return new string(buffer[..(int) length]);
+    }
+
     /// <summary>
     /// 按名查找任意已加载模块。优先 GetModuleHandle（在游戏进程内对某些名字会被反作弊
     /// 屏蔽成 0），失败则手动遍历 PEB 的 InLoadOrder 模块链表。

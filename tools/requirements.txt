@@ -9,3 +9,9 @@
 
 capstone==5.0.7        # 反汇编（migrate_masked 的掩码指纹）
 pefile==2023.2.7       # PE 解析（pe_utils）
+
+# 可选：numpy 只被 pe_utils.find_direct_calls 用（扫 E8 调用点），**不在 RVA 迁移链路上**。
+# 故意不写进本文件：`pip install -r` 装完就够跑 update_rva / migrate_masked / pdata，
+# 不需要为一次迁移多装一个几十 MB 的科学计算包。缺它时 find_direct_calls 会抛
+# NumpyMissing 并提示 `pip install numpy`（不会静默返回空表）。
+#   numpy>=1.24          # 只有 find_direct_calls 需要

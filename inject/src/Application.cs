@@ -40,6 +40,15 @@ internal static unsafe class Application {
     private static RvaSet? _selected;
     private static string _mainModuleName = "(未识别)";
 
+    /// <summary>实测到的 exe 版本指纹（头 64KB 的 CRC32；0 = 还没算 / 读不到）。</summary>
+    private static uint _versionFingerprint;
+
+    /// <summary>指纹比对结果。默认 <see cref="VersionGuard.State.Unchecked"/> = 行为与"没有这个机制"完全一致。</summary>
+    private static VersionGuard.State _versionState = VersionGuard.State.Unchecked;
+
+    /// <summary>NF 收到过几个"不像视频文件"的名字（用于限速上报，见 OnNativeSetFile）。</summary>
+    private static int _nfSuspectCount;
+
     /// <summary>
     /// 当前生效的 RVA 常量集：Awake 里按主模块名选定，未选定时按国服。
     /// 刻意用属性而不是"字段直接初始化成 Cn"：静态字段按**文本顺序**初始化，
@@ -60,23 +69,40 @@ internal static unsafe class Application {
     /// </summary>
     private sealed class RvaSet {
         public string Name = "";
+
+        /// <summary>
+        /// 这一版 exe 的版本指纹（头 64KB 的 CRC32，见 <see cref="VersionGuard"/>）。
+        /// **0 = 未登记**，不是错误：此时只能靠四道门自保，日志会说明。
+        /// 由 tools\update_rva.py 在迁移成功后自动写回，所以它和 NativeSetFile 永远是同一版的。
+        /// </summary>
+        public uint Fingerprint;
+
         public uint NativeSetFile;              // NF ★文件名来源，唯一的 il2cpp 钩子
     }
 
     /// <summary>
     /// 国服 7.1（YuanShen.exe）。已用「国际服 7.1 全量 idx→RVA 表 + 国服实测锚点标定位移 0x3120」
     /// 反查确认，并与 genshin-metadata/cn/out/methods.csv（idx75746）逐一核对一致。
+    /// Fingerprint = 0xC66689B9 = CRC32(exe 头 SizeOfHeaders=0x400 字节)，已用
+    /// rva_cache\YuanShen.exe（7.1 国服）实际算过；注意它**不等于**"文件前 64KB 的 CRC32"
+    /// （那是 0xE597A764，在内存镜像里算不出来，见 VersionGuard 的口径说明）。
     /// </summary>
     private static readonly RvaSet Cn = new() {
         Name = "国服 YuanShen.exe 7.1",
+        Fingerprint = 0xC66689B9,
         NativeSetFile = 0x070538C0,
     };
 
     /// <summary>
     /// 国际服 GenshinImpact.exe。来源：README 的 RVA 表（= 国际服 7.1 全量 idx→RVA 表直接读出来的值）。
+    /// Fingerprint = 0（未登记）：本机没有国际服客户端，**没实测过就不填**（编一个假指纹比不填更糟）。
+    /// 写成 <c>0x00000000</c> 而不是裸 <c>0</c>：update_rva.py 的常量正则只认 <c>0x</c> 字面量，
+    /// 写成裸 0 会让这一行既读不到也写不回，国际服就永远登记不上指纹。
+    /// 在国际服客户端上跑一次 update_rva.cmd 会自动补上。
     /// </summary>
     private static readonly RvaSet Gl = new() {
         Name = "国际服 GenshinImpact.exe（仅文件名 RVA 已定位）",
+        Fingerprint = 0x00000000,
         NativeSetFile = 0x070507A0,
     };
 
@@ -105,6 +131,9 @@ internal static unsafe class Application {
                 Goshujin.ResumeMainThread();
                 return 0;
             }
+            // 版本自证：先算指纹、再决定挂不挂（只影响日志与 GMK_STRICT=1 的可选拦截，
+            // 默认路径的挂钩行为与不检查时完全一致 —— 见 CheckVersion 的说明）
+            Safe("Awake:CheckVersion", CheckVersion);
             if (!MinHook.TryInitialize()) {
                 Goshujin.Report($"MinHook 初始化失败（MH 错误码 {MinHook.LastError}），放弃全部挂钩");
                 Goshujin.ResumeMainThread();
@@ -171,6 +200,105 @@ internal static unsafe class Application {
         }
         Goshujin.Report("未找到主模块（YuanShen.exe / GenshinImpact.exe），退出");
         return false;
+    }
+
+    /// <summary>
+    /// 版本自证：把 **exe 磁盘文件头部**的 CRC32 与常量集里登记的 <see cref="RvaSet.Fingerprint"/> 比对。
+    ///
+    /// **这个方法默认不改变任何行为**（不拒绝挂钩、不动归属），只多打一两行日志：
+    ///   · 匹配   → "版本指纹匹配 …"，说明这版 RVA 确实是给这版 exe 的；
+    ///   · 未登记 → "版本指纹未登记 …"，提示跑一次 update_rva 登记（国际服当前就是这种）；
+    ///   · 不匹配 → "⚠ 版本指纹不匹配 …"，游戏已更新而 RVA 还是旧的 —— 这是唯一会让
+    ///              GMK_STRICT=1 生效的状态（见 AttachCore），默认仍然照挂，只是把话说清楚。
+    ///   · 读不到 → 跳过判定（宁可不说，也不要说错）。
+    ///
+    /// ★ 为什么判定读**磁盘文件**而不是现成的内存镜像（2026-11-02 实跑教训）：
+    ///   带保护壳的客户端（本 exe 有 `.tls` 段 + TLS 目录）会在注入线程启动时先跑 TLS 回调，
+    ///   于是等这里读头部时，内存里的那 1KB 早被壳改写过 —— 同一版客户端实测
+    ///   磁盘 0xC66689B9 / 内存 0x9735915B。拿内存值比对就会每次误报"游戏已更新"，
+    ///   而且一开 GMK_STRICT=1 就会误杀 NF（NF 没了 → 文件名归属全丢 → 所有 BCKEY 被拒收）。
+    ///   所以内存值只作为参照写进日志，**不参与判定**。
+    ///
+    /// 为什么不默认拦：一次正常更新后如果忘了跑 update_rva，用户至少还能拿到 key（只是没有
+    /// 文件名）；把"宁可少挂"的选择权交给 GMK_STRICT 这个显式开关。
+    /// </summary>
+    private static void CheckVersion() {
+        var expected = Rva.Fingerprint;
+
+        // ① 判定来源：磁盘上的 exe 文件（与 tools\update_rva.py 读的是同一个文件、同一段字节）
+        if (!TryHashFileHeader(out var fileCrc, out var fileLen, out var why)) {
+            Goshujin.Report($"版本指纹：读不到 exe 文件（{why}），跳过校验（RVA 只能靠四道门自保）");
+            return;
+        }
+
+        // ② 参照：内存镜像头部。只记录，永不参与判定（保护壳会改写它，见方法注释）
+        var memoryNote = TryHashModuleHeader(out var memoryCrc, out _)
+            ? $"内存镜像头部 0x{memoryCrc:X8}（仅参照：保护壳会改写，不参与判定）"
+            : "内存镜像头部不可读";
+
+        _versionFingerprint = fileCrc;
+        _versionState = VersionGuard.Compare(fileCrc, expected);
+        Goshujin.Report($"版本指纹：磁盘文件头部 0x{fileCrc:X8}；{memoryNote}");
+        Goshujin.Report(VersionGuard.Describe(_versionState, fileCrc, expected, fileLen));
+    }
+
+    /// <summary>
+    /// 算 **磁盘上本进程 exe 文件**头部（前 SizeOfHeaders 字节）的 CRC32。
+    ///
+    /// 路径取 <see cref="Environment.ProcessPath"/> —— 本 DLL 注入在游戏进程里，它就是游戏 exe。
+    /// 打开方式必须是 `FileShare.ReadWrite | Delete`：exe 正被本进程映射着，独占打开会失败。
+    /// 读失败一律返回 false（**绝不回退到内存值**，那正是误报的来源）。
+    /// </summary>
+    private static bool TryHashFileHeader(out uint crc, out int length, out string why) {
+        crc = 0;
+        length = 0;
+        // 主用 P/Invoke（注入环境里最确定），拿不到再退回框架实现
+        var path = Native.GetProcessImagePath() ?? Environment.ProcessPath;
+        if (string.IsNullOrEmpty(path)) {
+            why = "拿不到进程 exe 路径";
+            return false;
+        }
+        try {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var buffer = new byte[VersionGuard.FingerprintBytes];
+            var read = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            if (read < 0x40) {
+                why = $"exe 头部只读到 {read} 字节";
+                return false;
+            }
+            if (!VersionGuard.TryHashHeader(buffer.AsSpan(0, read), out crc, out length)) {
+                why = $"头部声明的 SizeOfHeaders 超过可读的 {read} 字节";
+                return false;
+            }
+            why = "";
+            return true;
+        } catch (Exception e) when (e is IOException or UnauthorizedAccessException
+                                        or NotSupportedException or ArgumentException) {
+            why = e.GetType().Name;
+            return false;
+        } catch (Exception e) {
+            LogException("CheckVersion:file", e);
+            why = e.GetType().Name;
+            return false;
+        }
+    }
+
+    /// <summary>算当前**内存镜像**头部的 CRC32（只用来写日志做参照，不参与判定）。</summary>
+    private static bool TryHashModuleHeader(out uint crc, out int length) {
+        crc = 0;
+        length = 0;
+        var probe = VersionGuard.FingerprintBytes;
+        if (_pe != null && _pe.SizeOfImage < (uint) probe) {
+            probe = (int) _pe.SizeOfImage;
+        }
+        if (!Native.IsReadable(_base, probe)) {
+            probe = VersionGuard.FingerprintFallbackBytes;
+            if (!Native.IsReadable(_base, probe)) {
+                return false;
+            }
+        }
+        return VersionGuard.TryHashHeader(new ReadOnlySpan<byte>((void*) _base, probe), out crc, out length);
     }
 
     // ==================== 异常诊断（A8） ====================
@@ -351,6 +479,16 @@ internal static unsafe class Application {
         return string.Equals(name, previous, StringComparison.Ordinal) ? null : name;
     }
 
+    /// <summary>
+    /// 这个字符串像不像一个 CRI Mana 视频路径（用于发现"NF 挂错函数"，**不参与归属判定**）。
+    ///
+    /// 判据刻意只有两条：① 不是解析失败哨兵（以 <c>'('</c> 开头）；② 以 <c>.usm</c> 结尾
+    /// （大小写不敏感，实测报的是 <c>Cs_ZD_….usm</c>）。判据越宽越好 —— 它只用来写日志，
+    /// 一旦误判成"不像"，代价是多一行 WRN，而不是丢名字。
+    /// </summary>
+    private static bool LooksLikeVideoPath(string raw) =>
+        raw.Length > 4 && raw[0] != '(' && raw.EndsWith(".usm", StringComparison.OrdinalIgnoreCase);
+
     private static string HexOf(nint addr, int size) {
         if (addr == 0 || size <= 0 || !Native.IsReadable(addr, size)) {
             return "(unreadable)";
@@ -389,6 +527,14 @@ internal static unsafe class Application {
     /// （日志里的 <c>★ 文件 [i]: Cs_ZD_…</c> 就是它）。密钥本身来自 bcrypt 钩子（不在 il2cpp 段）。
     /// </summary>
     private static void AttachCore() {
+        // GMK_STRICT=1 且"指纹已登记但不匹配" → 主动不挂。
+        // 只有 Mismatch 才拦：Unregistered（例如国际服还没登记指纹）如果也拦，
+        // 这个开关会让人一个钩子都挂不上，反而比不检查更糟。
+        if (Options.StrictVersion && _versionState == VersionGuard.State.Mismatch) {
+            Goshujin.Report("[skip] NativeMethods_SetFile: GMK_STRICT=1 且版本指纹不匹配 → " +
+                            "不挂 NF（避免把补丁打到别的函数上）。跑 tools\\update_rva.cmd 迁移后重试");
+            return;
+        }
         if (TryResolveTarget("NativeMethods_SetFile", Rva.NativeSetFile, out var nf)) {
             Safe("AttachCore:NF", () => {
                 delegate* unmanaged<int, nint, nint, void> h = &OnNativeSetFile;
@@ -427,6 +573,16 @@ internal static unsafe class Application {
 
         try {
             Goshujin.Report($"MANAFILE [{playerIndex}] {txt}");
+            // 名字形状自证：CRI Mana 只播 .usm，“拿到的名字不像视频文件”是 NF 挂错函数
+            //（旧 RVA 恰好过了四道门）唯一能被被动发现的地方。**只观察、不改变归属行为** ——
+            // 真正的拦截交给 --old-rva 重迁 + GMK_STRICT，这里绝不擅自丢文件名。
+            // 放在 try 里：本文件铁律是任何回调都不得抛出未处理异常（NativeAOT 下会带走游戏）。
+            if (!LooksLikeVideoPath(txt)) {
+                var suspect = Interlocked.Increment(ref _nfSuspectCount);
+                if (suspect <= 3) {
+                    Goshujin.Report($"NFWARN #{suspect} 名字不像视频文件（NF 可能挂错函数）：{txt}");
+                }
+            }
             // 换了视频时把"仍然生效的那把"按新文件名补报一条 —— **默认关闭**（GMK_REUSE=1 才开）：
             // 实测每个视频都会自己重建密钥对象并报 BCKEY，补报只会在换新钥匙时抢跑误报（见 ReportInEffectKey）
             if (changedFile != null) {

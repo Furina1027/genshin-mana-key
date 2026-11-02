@@ -42,6 +42,11 @@
             被测的就是 DLL 里跑的那段逻辑，而不是复制品。
         -->
         <Compile Include="..\..\inject\src\Prologue.cs" Link="Prologue.cs" />
+        <!--
+            版本指纹（CRC32 + 三态比较）同理：纯函数、不碰地址，链接同一份源码就能覆盖。
+            update_rva.py 写回的 RvaSet.Fingerprint 与这里的算法必须是同一个口径（zlib CRC32）。
+        -->
+        <Compile Include="..\..\inject\src\VersionGuard.cs" Link="VersionGuard.cs" />
     </ItemGroup>
 
     <ItemGroup>

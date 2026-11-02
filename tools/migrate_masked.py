@@ -29,11 +29,15 @@ import sys
 
 try:
     from capstone import Cs, CS_ARCH_X86, CS_MODE_64
-    import numpy as np
 except ImportError as exc:                       # pragma: no cover - 取决于运行环境
     print(f'错误：缺少第三方依赖（{exc}）。安装：pip install -r tools/requirements.txt',
           file=sys.stderr)
     raise SystemExit(2)
+
+# ★ 这里**不能** import numpy：本模块的匹配走 bytes.find()，从来没用过 numpy。旧代码把它
+#   和 capstone 一起放在 try 里，于是"按 requirements.txt 装完依赖"的环境（那里只有
+#   capstone+pefile）一 import 就 ImportError → exit 2，整条迁移链路直接起不来。
+#   numpy 只被 pe_utils.find_direct_calls 当可选依赖用（那个函数不在迁移主链路上）。
 
 import pdata
 import pe_utils

@@ -33,7 +33,7 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 | 钩子 | 方法 | 国服 YuanShen.exe | 国际服 GenshinImpact.exe | 默认挂 |
 |---|---|---|---|---|
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）** |
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）**；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
 | — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **key 本体**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 | — | `bcrypt.dll!BCryptEncrypt` → 密钥流验证（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 
@@ -53,6 +53,10 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 > 任一步不过就跳过并打印「RVA 可能已过期」。游戏更新后 RVA 失效时，是"少挂钩"而不是"崩游戏"。
 
 ## 实际起作用的钩子（2026-10-16 默认配置实测）
+
+> **本节也是历史记录**：命中数是那一轮 DLL 构建（v19 口径，默认 `hook × 5`）跑出来的，
+> v20 已删除全部诊断钩子，**当前默认补丁面积只有 1 + 2**（见「钩子开关」）。
+> 保留下面的表是为了留"为什么只剩 NF + bcrypt"的证据链，不代表现在的挂钩清单。
 
 一整轮里每个钩子的**命中次数**（`run/dumper.log`，5 个视频）：
 
@@ -99,11 +103,18 @@ v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`，默认 il2cpp 补丁面积 **5 → 1
 3. 从 `inject\src\Application.cs` 读出当前常量当"旧 RVA"，用掩码指纹迁到新 exe
    （v20 起清单只有 NF 一项）；
 4. 打印 旧→新 对照表：**只采信唯一命中**；不唯一的会把候选列出来让你选（绝不自动猜）；
-5. **没迁上的常量会写成 `0`** —— C# 侧的约定是"0 = 该服务器未定位此钩子 → 跳过并打日志"，
-   比留着旧 RVA 安全（旧 RVA 在新版本里仍可能通过"可执行节+可读+序言"三项校验，
-   于是把补丁打到别的函数上，错得不声不响）。旧值可在 `.bak-<时间戳>` 备份里找回；
-   `NativeSetFile` 是唯一的关键项：它没迁上就**什么都不写**并以非 0 退出；
-6. 确认后写回源码（自动备份 `Application.cs.bak-<时间戳>`），可选接着跑 `build.bat`。
+5. **没迁上的常量会不会写成 `0`，取决于它是不是关键项** —— 真实语义（以前文档写含糊了）：
+   非 NF 的常量迁不上就写 `0`（C# 侧约定"0 = 该服务器未定位此钩子 → 跳过并打日志"，
+   比留着旧 RVA 安全）；**`NativeSetFile`（NF）例外：不写 0、保留旧 RVA**，脚本以非 0 退出 ——
+   关掉唯一的文件名来源比"少挂"更糟。⚠ 于是存在这种组合："**迁移失败还直接 build**" =
+   出厂的二进制是"**新 exe + 旧 RVA**"；旧 RVA 很容易仍通过"可执行节+可读+序言"三项校验，
+   于是把补丁打到别的函数上、错得不声不响。这正是下一节「版本指纹」存在的理由：下一次启动就把它喊出来。
+   旧值可在 `.bak-<时间戳>` 备份里找回，或 `git diff inject/src/Application.cs` 取回；
+6. **指纹会被一起写回**：迁移成功后脚本同时把**新 exe 的 `Fingerprint`**（`CRC32(头部 SizeOfHeaders 字节)`）写进
+   `RvaSet`，从此每次启动都能自证"这版 RVA 是给这版 exe 用的"（见下节）。显式 `--old-rva NAME=0xHEX`
+   用于兜底：源码里那一项**已被上次失败的迁移写成 0**（NF 则停在旧值）时，手工指定旧 RVA 重跑；
+7. 确认后写回源码（自动备份 `Application.cs.bak-<时间戳>`），可选接着跑 `build.bat`（`--build`）。
+   `--build` 失败时退出码是 **3**，此时**源码已经写回**、只有编译失败 —— 别误当成"没改源码"。
 
 > **交叉校验（推荐）**：NF 的真名 `CriWare.CriMana.Player.NativeMethods_SetFile` 不受混淆影响
 > （CRI 包装类保留原名）。用 [genshin-metadata](../../genshin-metadata/) 项目对新客户端跑一次
@@ -116,10 +127,115 @@ update_rva.cmd                 # 双击等价：问一句就写
 update_rva.cmd --yes --build   # 不问，写完直接重新编译部署
 update_rva.cmd --dry-run       # 只看结果，不写源码
 update_rva.cmd --force         # 旧/新 exe 完全相同也照跑（默认认为"没更新"直接退出）
+update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 时手工指定旧 RVA 重跑
 ```
+
+> 退出码：`0` 成功（含 `--dry-run` 成功）；`2` 参数/环境错误；
+> `1` = **NF 没迁上**（v20 起 NF 是唯一常量，此即"什么都没写"、NF 保留旧值）；
+> **`3` = 源码已写回但 `--build` 编译失败** —— 唯一一个"源码改了、产物没换"的码。
 
 > 第一次用（还没有 `rva_cache\`）时，把当前版本的 exe 复制成 `rva_cache\YuanShen.exe`，
 > 或者 `update_rva.cmd --old <旧exe>`。**这次 7.1 的 exe 已经缓存好了**，7.2 一更新直接双击即可。
+
+### 版本指纹（自证）
+
+**要解决的问题**：挂钩前那四道门（RVA≠0 → 落在可执行节 → 可读 → 序言像函数入口）只能证明
+"这是个函数入口"，证明不了"这个函数是 `NativeMethods_SetFile`"。最坏的情况是**旧 RVA 在新版里
+恰好仍然合法** —— 补丁打到别的函数上、游戏行为变得无法解释，而日志里一切都"正常"。
+指纹机制不改任何挂钩行为，只负责把这种状态**在启动第一秒就喊出来**。
+
+**口径**：`CRC32(exe **磁盘文件**头部 SizeOfHeaders 字节)`（标准 zlib 口径：反射输入输出、多项式 `0xEDB88320`、
+初值全 1、结果取反）。7.1 国服 `SizeOfHeaders = 0x400` → 登记值 `0xC66689B9`。
+`VersionGuard.FingerprintBytes = 0x10000` 只是**上限**（防畸形 `SizeOfHeaders` 把 CRC 拖成整文件）：
+实际长度由 `VersionGuard.FingerprintLength` 从头部读 —— 判据 `0x40 ≤ e_lfanew ≤ 0x1000`、签名 `PE\0\0`、
+`0x200 ≤ SizeOfHeaders ≤ 0x10000`，任一不过就兜底 `0x400`。登记值在
+`inject/src/Application.cs` 的 `RvaSet.Fingerprint`：
+
+| 常量集 | `Fingerprint` | 说明 |
+|---|---|---|
+| `Cn`（国服 `YuanShen.exe`） | `0xC66689B9` | `SizeOfHeaders = 0x400`；已用 `rva_cache\YuanShen.exe`（7.1 国服）实算复核 |
+| `Gl`（国际服 `GenshinImpact.exe`） | `0x00000000` | **未登记**：本机没有国际服客户端，没实测就不填（编一个假指纹比不填更糟） |
+
+**判定只认磁盘文件，内存镜像只作参照**（这是 2026-11-02 实跑踩出来的第二个坑）：
+带保护壳的客户端（本 exe 有 `.tls` 段 + TLS 目录）会在**注入线程启动时先跑 TLS 回调**，等 DLL 读头部时，
+内存里那 1KB 早被壳改写过 —— 同一版客户端实测：**磁盘 `0xC66689B9` / 内存 `0x9735915B`**（同长度、同算法）。
+若拿内存值比对，就会每次启动都误报"游戏已更新"，而且一开 `GMK_STRICT=1` 就会**误杀 NF**
+（NF 挂了不上 → 文件名归属全丢 → 所有 `BCKEY` 因 `file=?` 被拒收，密钥库一个字都写不进去）。
+
+所以现在的实现是：
+- **判定**：`Application.TryHashFileHeader` 用 `Environment.ProcessPath` 取本进程 exe 路径，
+  以 `FileShare.ReadWrite | Delete` 读前 `SizeOfHeaders` 字节算 CRC（与 `update_rva.py` 读的是同一个文件、同一段字节）；
+- **参照**：`TryHashModuleHeader` 把内存镜像头部的 CRC 也算一份写进日志，**永不参与判定**；
+- **读不到就跳过**：文件打不开 / 头部声明长度超过可读字节 → 只打一行说明，不判"不匹配"（宁可不说，也不说错）。
+
+**为什么不用"文件头 64KB"**：`FileAlignment = 0x200 ≠ SectionAlignment = 0x1000`，所以**内存镜像的前 64KB
+与文件前 64KB 不是同一段字节** —— 镜像里 `[SizeOfHeaders, 0x1000)` 是 0 填充，文件里那段是 `.text` 数据。
+实测 `rva_cache\YuanShen.exe`：**文件前 64KB CRC32 = `0xE597A764`，模拟内存镜像前 64KB CRC32 = `0xF1CC54E7`**。
+长度取 `SizeOfHeaders` 之后，文件与镜像的 `[0, SizeOfHeaders)` 本来逐字节一致（保护壳改写是后来的事，
+所以才把判定挪到文件上）。
+
+`0` 的语义是"**未登记**"，不是"不匹配" —— 三态而非两态（`VersionGuard.State`：
+`Match` / `Mismatch` / `Unregistered`）。
+
+**启动时多两行日志**（`Goshujin.Report` → `[DLL] 版本指纹…`，落在 `dumper.log`；
+`mana_keys.log` 只收 `MANAKEY*` / `MANAFILE*` / `BCKEY` 三种前缀，所以那里没有这两行）：
+
+| 实测 vs 登记（**磁盘**） | 日志（`N` = 本次实际取的字节数，十进制） |
+|---|---|
+| 相等 | `版本指纹匹配 0xC66689B9（这版 RVA 属于这个 exe）（口径：exe 头 1024 字节）` |
+| 登记为 `0` | `版本指纹未登记（实测 0x…）：无法校验 RVA 是否属于本版本，只能靠四道门（可执行节/可读/序言）自保。跑一次 tools\update_rva.cmd 即可登记（口径：exe 头 N 字节）` |
+| 不等 | `⚠ 版本指纹不匹配：实测 0x…，源码登记 0x… —— 游戏已更新？请先跑 tools\update_rva.cmd；残留旧 RVA 会把补丁打到别的函数上（口径：exe 头 N 字节）` |
+
+每次还会多一行参照：`版本指纹：磁盘文件头部 0x…；内存镜像头部 0x…（仅参照：保护壳会改写，不参与判定）`
+—— 两个数不一样是**正常的**，正是它解释了"为什么判定非要读文件"。
+
+末尾的 `（口径：exe 头 N 字节）` 是 `VersionGuard.Describe(state, actual, expected, length)` 的 `length`
+（`Application.CheckVersion` 传实际长度，7.1 国服 = `0x400` → "1024 字节"）。它存在的理由：
+**"口径被改坏"这件事在日志里能立刻看见** —— 按 64KB 取会得到 `0xF1CC54E7`、文件里却是 `0xE597A764`，
+而带后缀的行一眼就能看出"这轮到底算了多少字节"，不用回头翻源码。
+
+（还有一条"读不到 exe 文件（…），跳过校验"—— 文件读不出来时只靠四道门。）
+
+> **同一个 exe 的四个数，别混用**（C# 与 Python 两侧都按第 2 行实现；测试把第 1、3、4 行钉成了"反例断言"）：
+>
+> | 数值 | 是什么 | 能不能当指纹 |
+> |---|---|---|
+> | `0xE597A764` | **文件**前 64KB 的 CRC32（历史/CDN 核对值） | ❌ 不能（镜像同区间是 `0xF1CC54E7`） |
+> | `0xC66689B9` | **文件**头 `SizeOfHeaders`（0x400）字节的 CRC32 | ✅ 就是 `RvaSet.Fingerprint` 登记值，也是判定用的那个 |
+> | `0xF1CC54E7` | **内存镜像**前 64KB 的 CRC32（按 64KB 取值时的模拟结果） | ❌ 不能（文件里是 `0xE597A764`） |
+> | `0x9735915B` | **内存镜像**头 1KB 的 CRC32（2026-11-02 实跑实测） | ❌ 不能（保护壳改写了头部，无法从文件复现） |
+
+**默认只警告、照挂**，不改变任何挂钩行为。理由很实际：一次正常更新后如果忘了跑 `update_rva.cmd`，
+用户至少还能拿到 key（只是没有文件名归属，`BCKEY file=?`）；把"宁可少挂也不打错补丁"的选择权
+交给一个显式开关，而不是替所有人做决定。
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `GMK_STRICT=1` | 关 | **只有**"指纹已登记但与当前 exe 不符（`Mismatch`）"时**跳过 NF 挂钩**（其余钩子不拦）；默认只警告、照挂。"未登记"（登记值 `0`，例如国际服）**不拦** —— 否则这个开关会让人一个钩子都挂不上，比不检查更糟 |
+
+严格模式的日志形态：`[skip] NativeMethods_SetFile: GMK_STRICT=1 且版本指纹不匹配 → 不挂 NF（避免把补丁打到别的函数上）。跑 tools\update_rva.cmd 迁移后重试`。
+
+**闭环**：`tools\update_rva.py` 迁移成功时把新 exe 的指纹一起写回 `RvaSet.Fingerprint`，所以正常流程是
+"双击 `update_rva.cmd` → 指纹自动更新 → 下次启动显示「匹配」"。指纹**不是**安全机制，
+也不是"证明这版 RVA 正确"的证据 —— 它只防"忘记迁移"这一种事故（含上文「迁移失败还直接 build」那种组合）。
+
+**算不出来就不算**（两边同一条规矩）：头部声明 `SizeOfHeaders` 比实际可读字节还多、
+或 `read_constants` 发现源码是旧格式（`RvaSet` 里没有 `Fingerprint` 字段）时，
+`update_rva.py` **不登记指纹**（打一句 `⚠ … 跳过指纹登记（RVA 仍然照常迁移）`，退出码不变），
+DLL 侧对应地**跳过校验**并打一行说明。理由：指纹的全部意义是"两边算出同一个数"，
+任何"夹到可读长度凑一个 CRC"都会变成假绿灯或永久误报。
+同理，`Fingerprint` **只在迁移清单里每一项都成功时**才写回 —— 有任何一个没迁上还登记，
+下一版拿到的就是"版本对得上、地址却过期"，比不登记更危险。
+
+**顺带的自证：名字形状**。NF 是唯一能在运行时**被动**发现"挂错函数"的钩子 —— CRI Mana 只播 `.usm`。
+所以 `OnNativeSetFile` 里有一条**只观察、不改变归属**的日志（最多 3 条，之后只累加计数）：
+
+```
+NFWARN #1 名字不像视频文件（NF 可能挂错函数）：<拿到的字符串>
+```
+
+它绝不擅自丢文件名（宁可留着可疑归属，也不让 `paired_keys.json` 空转）；真正的拦截是
+`--old-rva` 重迁 + `GMK_STRICT=1`。
 
 下面是不用脚本时的手动流程/原理，排错时看。
 
@@ -134,6 +250,11 @@ update_rva.cmd --force         # 旧/新 exe 完全相同也照跑（默认认�
 3. **2026-10-18 复核**：用国际服 7.1 全量 `idx→RVA` 表 + 两个国服实测锚点标定位移
    （`0x3120`）反查，发现 5 个里 4 个对、S3 错指到 `Player.UpdateWithUserTime`（已修正）。
 
+> 上面提到的 `tools/locate_hooks.py`（求 methodPointer 表基址）与 `tools/align_class.py`（整类对齐）
+> 已在 **2026-10-25 瘦身**（commit `ede0c7f`）中删除。现在 `tools\` 只有 4 个文件：
+> `update_rva.py` / `migrate_masked.py` / `pdata.py` / `pe_utils.py`；剩下的都是历史，
+> 需要复现当时流程时从 git 恢复（见下文「游戏版本更新后怎么重新定位 RVA」）。
+
 ### 重找（一条命令）
 
 ```powershell
@@ -147,19 +268,21 @@ python tools\migrate_masked.py --src <旧exe> --dst <新exe> `
   全部掩码 → 地址整体平移、编译器微调都不影响；
 - 输出里的 `delta` 是整体平移量，可用来给同类函数做快速换算，但**仍要逐个验证落在函数起点**。
 
-某个函数不命中时（函数体改动大）：用 `tools\align_class.py` 做**整类对齐** ——
-一个类的方法在二进制里是连续区块、顺序基本不变，整类对齐比单函数迁移稳。
+某个函数不命中时（函数体改动大）：以前用 `tools\align_class.py` 做**整类对齐**（一个类的方法在二进制里
+是连续区块、顺序基本不变，整类对齐比单函数迁移稳）—— **该脚本已删**（2026-10-25 瘦身，`ede0c7f`），
+需要时从 git 恢复。现在日常只剩两条路：`--old-rva NAME=0xHEX` 手工指定旧值重跑，
+或者用 `genshin-metadata` 的 `methods.csv` 按名直读新 RVA 做交叉校验。
 
 ### 验证（三步）
 
 ```powershell
-# ① 新地址必须是 .pdata/异常目录里的函数起点，且 size 合理
+# ① 新地址必须是函数起点，且 size 合理
 python tools\pdata.py --exe <新exe> --near 0x<新RVA> --span 0x40
-# ② 反汇编看序言与参数个数
-python tools\dump_rva.py --exe <新exe> --rva 0x<新RVA> --len 20
+# ② 反汇编看序言与参数个数（dump_rva.py 已删；migrate_masked 的 --dis 打印源函数反汇编）
+python tools\migrate_masked.py --src <旧exe> --dst <新exe> --rva NF=0x<旧RVA> --dis
 ```
 ③ 实跑一轮：日志里应只有 1 行 `hook NativeMethods_SetFile @ …`，播放几个视频能看到
-`★★ 已配对`；文件名变成 `?` 就说明 NF 挂错了。
+`★★ 已配对`；文件名变成 `?` 就说明 NF 挂错了（该轮日志里会有 `NFWARN`，见「版本指纹」一节）。
 
 ### 兜底（RVA 全失效也能出 key）
 
@@ -187,10 +310,14 @@ RVA `0x19F73B00` / `0xD796B8` 字节 / 1,177,402 条，全部合法且单调有�
 | `GMK_BC=0` | 开 | 关掉 `bcrypt.dll`（系统库）钩子。默认运行**唯一真正产出密钥**的就是这条路径 —— 除非事实证明系统库补丁也影响播放，否则不要关 |
 | `GMK_FS=1` | 关 | 启动 CRI FS 侦察线程。实测该线程会让视频无法播放，仅用于调查（无 RVA 依赖，不参与版本更新） |
 | `GMK_REUSE=1` | 关 | 打开「跨视频复用密钥」的补报。实测每个视频都会自己重建密钥对象并报 `BCKEY`（自带文件名），补报只会在换新钥匙时抢跑误报，仅当某个视频一条 `BCKEY` 都没有时才需要它（见下面「同一把密钥可能覆盖多个视频」） |
+| `GMK_STRICT=1` | 关 | 严格版本模式：**只在"版本指纹已登记但与当前 exe 不符"时跳过 NF 挂钩**（默认只警告、照挂；"未登记"不拦）。取舍见「版本指纹（自证）」一节 |
 
 （v20 起没有诊断钩子了，`GMK_FULL` 开关已随诊断代码一起删除。）
 
-默认运行 = **1 个 il2cpp 补丁（NF，文件名来源）+ 2 个 bcrypt 导出钩子（取 key + 验签）**。
+默认运行 = **1 个 il2cpp 补丁（NF，文件名来源）+ 2 个 bcrypt 导出钩子（取 key + 验签）**，
+即**补丁面积 1 + 2**；诊断钩子（`SUB*` / `MANAKEY*` 等）已不存在，所以**默认**下这个数字是常数。
+只有两个开关会改它：`GMK_BC=0` 关掉 bcrypt 的那 2 个（只剩 NF = 1 + 0）；
+`GMK_STRICT=1` 在"指纹不匹配"时关掉 NF（只剩 bcrypt 的 2 个）。
 
 ## 使用（需要管理员，游戏必须已关闭）
 
@@ -219,6 +346,15 @@ ManaKeyDumper.exe <游戏目录 或 exe 全路径>   # 显式指定（优先级�
 
 四个产物（`mana_keys.log` / `paired_keys.json` / `dumper.log` / `dump\`）全部锚定在 **exe 所在目录**，
 不管从哪个工作目录启动都一样。
+
+> ⚠️ `run\` 里**现存**的 `dumper.log` / `mana_keys.log` / `paired_keys.json` 与 `dump\` 是历史运行残留，
+> 可能来自**旧版 DLL**（与当前源码不同步：`dumper.log` 里还有 v20 已删除的
+> `SUB hook VideoSubtitles.Start`、`hook SetVideoAudioDecryptionKeys`、`hook × 5` 这类行）。
+> 它们只证明"当时那一轮"，不能用来核对当前默认补丁面积（= 1 + 2）、也不能当成当前版本跑通了的证据；
+> 判据一律以本轮新生成的 `dumper.log` 为准。
+>
+> 但 `paired_keys.json` 要分开看：它的**条目格式与当前完全一致**（`{ "文件名": { "aes": "32hex" } }`），
+> 已有的旧条目**可直接并入 key 库、不要删** —— 旧痕迹只在日志行里，不在密钥库里。
 
 几个可靠性细节（都是踩过的坑）：
 
@@ -306,6 +442,9 @@ copy "BetterGenshinImpact\Resources\Fonts\MiSans-Regular.ttf" run\
 不拷也能用，中文自动退到系统雅黑。字体放在别处就用 `GMK_OVERLAY_FONT_FILE` 指过去；
 若你的字体族名不是 `MiSans`，用 `GMK_OVERLAY_CJK_FONT` 指定族名。
 
+> 字体文件放进 `run\` **不会被提交**：`run\` 整个目录被 `.gitignore` 覆盖
+> （`.gitignore` 里还单独列了 `game_path.txt` 兜底）。所以拷字体既不影响仓库、也不占 diff。
+
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
 | `GMK_OVERLAY=0` | 遮罩开 | 关掉遮罩；日志只在 `dumper.log` 里（要控制台再配 `GMK_CONSOLE=1`） |
@@ -369,22 +508,30 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 ## 游戏版本更新后怎么重新定位 RVA
 
 **不要**靠 dump.cs（米哈游的混淆 metadata 让 Il2CppDumper 直接报
-`Metadata file not found or encrypted`）。用 `tools/` 里的自研链：
+`Metadata file not found or encrypted`）。用 `tools/` 里的自研链 —— 现在只有 4 个脚本：
 
-1. `tools/locate_hooks.py` — 由 CDN 下发的 `to_int32` RVA 反推 **methodPointer 表基址**
-   （`表基址 = to_int32 指针所在文件偏移 − 1357×8`，1357 是 `ToInt32` 的全局方法索引），
-   然后按索引直接读表拿 RVA。**索引会平移**，所以它会用多个已知参照项交叉验证候选基址
-   （`--window` 搜索平移量），自洽解不唯一时报错退出，不会给出"看着合理其实是错的"RVA。
-2. `tools/align_class.py` — 把上一版本的某个类**逐方法做掩码指纹对齐**，
-   找出新版本新增的槽位（新增的就是新钩子）。
-3. `tools/migrate_masked.py` — 单函数跨版本/跨服迁移（掩码指纹，`call/disp/imm` 通配），
-   用来双服交叉验证：国服→国际服应一一对应。指纹按 `.pdata` 的函数边界截断，不会越读进下一个函数。
-4. `tools/dump_rva.py` — 定点反汇编，看序言数参数个数（决定 hook 签名）。
-5. `tools/read_str.py` — 读 P/Invoke 描述符里的模块名/入口名。
+1. `tools/update_rva.py` — **版本迁移的唯一入口**（`update_rva.cmd` 就是它的壳）：
+   从 `inject/src/Application.cs` 读旧常量 → 掩码指纹迁到新 exe → 打印 旧→新 对照表 →
+   写回源码 + 新 exe 的 `Fingerprint`。`--old-rva NAME=0xHEX` 用于"源码里该项已被写成 0"时手工指定旧值；
+   `--dry-run` 只看不写；`--build` 写完接着编译（失败退出码 3）。
+2. `tools/migrate_masked.py` — 单函数跨版本/跨服迁移（掩码指纹，`call/disp/imm` 通配），
+   用来双服交叉验证：国服→国际服应一一对应。指纹按函数边界截断，不会越读进下一个函数；
+   `--dis` 顺带打印源函数反汇编（原来 `dump_rva.py` 的用途）。
+3. `tools/pdata.py` — 函数边界（异常目录 / `.pdata` 双来源取信），迁移与校验都靠它。
+4. `tools/pe_utils.py` — PE 加载与 RVA→文件偏移映射的共用层（不单独跑，被上面几个 import）。
+
+> **已删脚本（2026-10-25 瘦身，commit `ede0c7f`）**：`align_class.py`（整类对齐）、
+> `locate_hooks.py`（methodPointer 表基址 / `--window` 平移搜索）、`dump_rva.py`（定点反汇编）、
+> `read_str.py`（读 P/Invoke 描述符里的模块名/入口名）、以及全部 `usm*.py`。
+> 文档里教这些脚本的段落已改成"已删，历史见 git"；需要时从 git 恢复，例如
+> `git show ede0c7f^:tools/dump_rva.py > tools/dump_rva.py`。日常迁移流程不再需要它们。
 
 工程化约定（为了能脚本化/进 CI）：
 
-- 依赖固定在 `tools/requirements.txt`（capstone / pefile）。
+- 依赖固定在 `tools/requirements.txt`（只有 `capstone` / `pefile`）。`pip install -r tools\requirements.txt`
+  **不再需要 numpy** —— `numpy` 在文件里是注释掉的可选项，只被 `pe_utils.find_direct_calls`
+  （扫全段找 `E8 rel32` 调用点那类调查）在函数内 `import`；缺它时抛 `NumpyMissing` 并提示装包
+  （**不会**静默返回空表）。日常迁移四件套用不到它。
 - PE 加载与 RVA→文件偏移映射统一走 `tools/pe_utils.py`（**越界即抛**，不再用
   `max(VirtualSize, SizeOfRawData)` 那种会接受越界 RVA 的不可靠映射）。
 - （USM 解析脚本已于 2026-10-25 随瘦身删除 —— 密钥直接从游戏内存读出，
@@ -392,7 +539,8 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 - 所有脚本：`main()` 返回 int + `raise SystemExit(main())`，**定位失败返回非 0**；
   加 `--json` 便于脚本消费；`--help` 一律可用。
 - 脚本自身的单测在 `tools/tests/`（`python -m unittest discover -s tools/tests -v`），
-  覆盖 PE RVA 越界、`.pdata` 边界解析、update_rva 的读写回源码约定。
+  覆盖 PE RVA 越界、`.pdata` 边界解析、update_rva 的读写回源码约定、**指纹写回与
+  `--old-rva` 解析**、以及"迁移失败绝不登记指纹"这条铁律。
 
 ## 目录
 
@@ -400,13 +548,17 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 ├── inject/    注入 DLL（hook + 管道上报），NativeAOT，导出 YaeMain
 ├── launcher/  启动器（挂起拉起 + 注入 + 配对写 paired_keys.json），NativeAOT
 ├── run/       ManaKeyDumper.exe/dll + 产物
-├── tests/     启动器纯逻辑单测（配对状态机 + 密钥库读写，xunit）
+├── tests/     纯逻辑单测（配对状态机 + 密钥库读写 + 序言判据 + 版本指纹，xunit）
 └── tools/     版本迁移四件套：update_rva / migrate_masked / pdata / pe_utils（Python + capstone/pefile）
 ```
 
 ---
 
 ## 首轮实测（2026-09-23）与 v2 诊断版
+
+> **本节以及下面的「第三轮修复」「实测结果」都是历史记录**，日志来自**当时的 DLL 构建**，与当前源码不同步
+> （`SUB*`、`MANAKEY*`、`hook × 5`、14 个诊断钩子都已被 v20 删除）。事实内容按原样保留，
+> 只作事故复盘证据；**当前行为以「钩子开关」「版本指纹」两节为准**。
 
 ### 首轮结果：钩子全挂上，但密钥函数一次都没被调用
 
@@ -420,6 +572,9 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 ```
 
 - 客户端确认是 **7.1 国服**（exe 头 64KB CRC32 `0xE597A764`，与官方 CDN 下发的国服指纹一致）；
+  *（口径提醒：这个 `0xE597A764` 是**文件前 64KB** 的 CRC32、当时手工核对 CDN 指纹用的。
+  现在 `RvaSet.Fingerprint` 用的是 `SizeOfHeaders` 字节口径 = `0xC66689B9`，**两个数别混用** ——
+  镜像前 64KB 又是第三个数 `0xF1CC54E7`。原因见「版本指纹（自证）」一节。）*
 - 触发的文件是 `Cs_ZD_AQ70201201_SLT.usm` / `Cs_ZD_AQ70201101_RTF_Girl.usm`，
   **md5 与我们手上的样本完全一致**（就是那 11 个目标里的两个）；
 - 但 **4 个设密钥函数 0 次调用**。

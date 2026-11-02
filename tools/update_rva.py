@@ -7,11 +7,18 @@
   1. 找**新 exe**：命令行参数 / `run\\game_path.txt` / 常见安装路径（可把新 exe 拖到 cmd 上）；
   2. 找**旧 exe**：命令行参数 / `rva_cache\\<exe名>`（脚本每次成功后会自动缓存一份）；
   3. 从 `inject/src/Application.cs` 读出当前常量（`Cn` / `Gl` 常量集），当作"旧 RVA"；
+     **源码里某个常量是 0（上次迁移留下的"未定位"）时不再静默跳过** —— 要么显式警告
+     并给恢复办法，要么用 `--old-rva NAME=0x…` 手给一个旧地址；
   4. 用 `tools/migrate_masked.py` 的掩码指纹迁移，把这些函数迁到新 exe —— 地址平移、
      编译器微调都不影响，**只采信唯一命中**；
   5. 多个候选时，用"同一个类整体平移量一致"消歧（只有和 NF 的位移差在 ±0x20000 内才认）；
   6. 表格确认后写回源码（自动备份 `Application.cs`），可选接着跑 `build.bat`；
-  7. 把新 exe 缓存到 `rva_cache\\`，下次更新就有"旧 exe"可用。
+  7. 把新 exe 缓存到 `rva_cache\\`，下次更新就有"旧 exe"可用；
+  8. 把新 exe **头部 SizeOfHeaders 字节的 CRC32（zlib 口径）** 写回源码的 `Fingerprint`。
+     口径必须是 `[0, SizeOfHeaders)`：只有这一段在文件与内存镜像里逐字节一致（固定 64KB 会
+     把 `.text` 的原始数据算进去，而 DLL 运行时看到的是 0 填充 → 永远不匹配）。它是
+     "源码里这些 RVA 属于这一版 exe"的断言，所以只在全部常量都迁移成功时才写 —— 有任何一个
+     没迁上还写它，下一版就会拿到"版本对得上、地址却过期"的假绿灯（C# 侧挡不住）。
 
 v20 起源码里只剩 1 个 il2cpp RVA（NativeSetFile，文件名来源）——诊断钩子已随
 2026-10 的清理一起删除，本脚本的迁移清单也缩到 1 项。
@@ -26,8 +33,13 @@ v20 起源码里只剩 1 个 il2cpp RVA（NativeSetFile，文件名来源）—�
   python tools\\update_rva.py --new <新exe> --yes   # 不问直接写
   python tools\\update_rva.py --new <新exe> --dry-run   # 只看结果不写
   python tools\\update_rva.py --new <新exe> --build    # 写完后跑 build.bat
+  python tools\\update_rva.py --new <新exe> --old-rva NativeSetFile=0x070538C0
+      # 源码里该常量是 0（上次迁移失败）时，用它指定旧 RVA
 
-退出码：0=成功（已写或 --dry-run 成功）；1=有函数没迁移成功（未写源码）；2=参数/环境错误。
+退出码：0=成功（已写或 --dry-run 成功）；
+        1=有函数没迁移成功（未写源码）或用户取消；
+        2=参数/环境/PE 错误；
+        3=**源码已写回**但 build.bat 失败（备份文件名会打印出来，别重跑迁移）。
 """
 from __future__ import annotations
 
@@ -37,8 +49,10 @@ import re
 import hashlib
 import shutil
 import subprocess
+import struct
 import sys
 import time
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -57,6 +71,9 @@ except ImportError as exc:     # pragma: no cover - 取决于运行环境
 EXIT_OK = 0
 EXIT_PARTIAL = 1
 EXIT_PARAM = 2
+#: 源码已改、只是编译失败。与 EXIT_PARTIAL 分开，否则 cmd 会把"已写回"说成"未改动"，
+#: 用户会以为源码没事而重跑迁移（那时旧 RVA 已经变成新值，指纹会拿新值去当旧 RVA）。
+EXIT_BUILD_FAILED = 3
 
 SOURCE = os.path.join(ROOT, 'inject', 'src', 'Application.cs')
 CACHE_DIR = os.path.join(ROOT, 'rva_cache')
@@ -67,13 +84,28 @@ FINGERPRINT_INSNS = 28
 MIN_ANCHOR = 6
 MAX_HITS = 12
 
+#: ★ 指纹 = CRC32(exe 头部 **SizeOfHeaders** 字节)，不是"固定 64KB"，也不是整文件。
+#:   原因（实测 7.1 国服）：FileAlignment=0x200 / SectionAlignment=0x1000，加载器只把文件
+#:   开头 SizeOfHeaders 字节原样映射到模块基址，`[SizeOfHeaders, 0x1000)` 在内存镜像里是 0
+#:   填充、在文件里是 .text 的原始数据 —— 于是"文件头 64KB"和"内存镜像头 64KB"不是同一段
+#:   字节，DLL 运行时按镜像算出来的值永远对不上，每次启动都报"指纹不匹配"，比不做还糟。
+#:   只有 `[0, SizeOfHeaders)` 这一段在文件与内存镜像里逐字节一致，所以口径取它。
+#:   （7.1 国服：SizeOfHeaders=0x400 → 0xC66689B9；文件头 64KB 是 0xE597A764，两者不同。）
+FINGERPRINT_MAX_BYTES = 0x10000        # 上限：防畸形 SizeOfHeaders 把整个 exe 读进来
+FINGERPRINT_MIN_BYTES = 0x200          # 下限：比一个文件对齐还小就不可能装下 PE 头
+FINGERPRINT_FALLBACK_BYTES = 0x400     # 头部自解析不可信时的兜底长度（= 典型 SizeOfHeaders）
+
 # v20 起源码里只剩这一个 il2cpp RVA（诊断钩子已删除）。保留列表形式：
 # 以后若新增钩子，往这里加名字（必须与 Application.cs RvaSet 的字段名一致）即可。
 FUNCTION_ORDER = ['NativeSetFile']
 
 BLOCK_RE = re.compile(
     r'(?s)(private static readonly RvaSet (?P<which>Cn|Gl) = new\(\) \{)(?P<body>.*?)(\n    \};)')
+# ★ 值只认 0x 字面量（Application.cs 那边配合：未登记的指纹也写成 `0x00000000`，不写裸 0）。
+#   别把这里放宽成"0x+十进制都能收"：写回格式是 0x%08X，混着来会让 diff 与注释对不上。
 FIELD_RE = re.compile(r'(?m)^(?P<indent>\s+)(?P<name>\w+) = 0x(?P<rva>[0-9A-Fa-f]+)(?P<tail>,.*)$')
+#: --old-rva 的 NAME=值（值交给 pe_utils.parse_int，接受 0x/十进制/裸十六进制）
+OLD_RVA_RE = re.compile(r'^(?P<name>[A-Za-z_]\w*)=(?P<val>\S+)$')
 
 
 def _rel(path: str) -> str:
@@ -147,6 +179,118 @@ def read_constants(path: str, which: str) -> dict:
             out[f.group('name')] = int(f.group('rva'), 16)
         return out
     raise SystemExit(f'错误：在 {path} 里找不到 RvaSet {which} 块')
+
+
+def fingerprint_length(data: bytes) -> int:
+    """头部指纹长度 = PE 的 **SizeOfHeaders**（与 C# VersionGuard.FingerprintLength 同一套判据）。
+
+    为什么不是固定 64KB：加载器只把文件开头 SizeOfHeaders 字节原样映射到模块基址，
+    之后的 `[SizeOfHeaders, SectionAlignment)` 在内存里是 0 填充、在文件里是段数据。
+    DLL 在运行时读的是镜像，所以只有 `[0, SizeOfHeaders)` 两边逐字节一致。
+
+    判据（任何一步不可信就退回 FINGERPRINT_FALLBACK_BYTES，绝不靠猜）：
+      1) `len(data) < 0x40` —— 连 DOS 头都没有；
+      2) `e_lfanew = u32@0x3C` 必须在 `[0x40, 0x1000]`；
+      3) `u32@e_lfanew == 0x4550`（`PE\\0\\0`）；
+      4) `SizeOfHeaders = u32@(e_lfanew + 0x18 + 0x3C)`（可选头起 + 0x3C，PE32/PE32+ 同偏移）；
+      5) 它必须落在 `[MIN, MAX]`，否则退回兜底；合法时**原样返回**（不夹到 `len(data)`）。
+
+    ★ 不夹的理由：声明比实际可读字节多，说明这份文件/镜像的头部不完整，两边算不出同一个
+      数。夹一下凑出一个 CRC 只会变成假绿灯或永久误报 —— 交给 :func:`exe_fingerprint`
+      判"算不出来（None）"，与 C# 侧"跳过校验 + 打日志"同语义。
+    """
+    if len(data) < 0x40:
+        return FINGERPRINT_FALLBACK_BYTES
+    e_lfanew = struct.unpack_from('<I', data, 0x3C)[0]
+    if not 0x40 <= e_lfanew <= 0x1000:
+        return FINGERPRINT_FALLBACK_BYTES
+    if len(data) < e_lfanew + 0x58:            # 4 字节签名 + 20 文件头 + 可选头 0x3C..0x40
+        return FINGERPRINT_FALLBACK_BYTES
+    if struct.unpack_from('<I', data, e_lfanew)[0] != 0x4550:
+        return FINGERPRINT_FALLBACK_BYTES
+    size_of_headers = struct.unpack_from('<I', data, e_lfanew + 0x18 + 0x3C)[0]
+    if not FINGERPRINT_MIN_BYTES <= size_of_headers <= FINGERPRINT_MAX_BYTES:
+        return FINGERPRINT_FALLBACK_BYTES
+    return size_of_headers
+
+
+def head_span(path: str) -> tuple[int, int]:
+    """返回 (声明的头部长度, 实际读到多少字节)，只给"跳过指纹登记"的提示文案用。"""
+    with open(path, 'rb') as fh:
+        head = fh.read(FINGERPRINT_MAX_BYTES)
+    return fingerprint_length(head), len(head)
+
+
+def exe_fingerprint(path: str) -> int | None:
+    """CRC32(exe 头部 SizeOfHeaders 字节)，与 C# 侧 VersionGuard 的登记值同一口径。
+
+    只读头部最多 `FINGERPRINT_MAX_BYTES`（实际只算 SizeOfHeaders 个字节）：这几百字节里有
+    PE 头、节表、入口点这些"每次构建都变"的东西，而 400MB 的 il2cpp 代码段不进 CRC ——
+    424MB 的 exe 也一样是毫秒级。
+
+    返回 **None** 表示"这段字节凑不齐，算不出可信指纹"（声明的 SizeOfHeaders 大于实际可读
+    字节）。这时**不许**退化成"夹到可读长度照算"：指纹的全部意义是"两边算出同一个数"，
+    凑出来的值只会在 DLL 侧变成每次都报"版本指纹不匹配"，或更糟——变成一张假绿灯。
+    """
+    with open(path, 'rb') as fh:
+        head = fh.read(FINGERPRINT_MAX_BYTES)
+    length = fingerprint_length(head)
+    if length > len(head):
+        return None
+    return zlib.crc32(head[:length]) & 0xFFFFFFFF
+
+
+def parse_old_rva(entries: list[str]) -> dict:
+    """解析可重复的 `--old-rva NAME=0xHEX`，返回 {名字: RVA}。
+
+    用途：源码里某个常量是 0（上一轮迁移失败、C# 侧按"未定位"跳过）时，正常路径拿不到
+    旧 RVA，整条迁移链就断了。这时用 `--old-rva NativeSetFile=0x070538C0` 手给一个旧地址，
+    从 `Application.cs.bak-<时间戳>` 或 git 里抄。
+
+    非法输入一律 `SystemExit`（与 read_constants 同风格）：这是参数错误，不写源码、
+    也不该让后面的迁移带着半个清单跑。
+    """
+    out = {}
+    for item in (entries or []):
+        m = OLD_RVA_RE.match(str(item).strip())
+        if not m:
+            raise SystemExit(f'错误：--old-rva 需要 NAME=0xRVA 形式，收到 {item!r}')
+        name = m.group('name')
+        try:
+            value = pe_utils.parse_int(m.group('val'))
+        except ValueError:
+            raise SystemExit(
+                f'错误：--old-rva {name} 的地址无法解析：{m.group("val")!r}'
+                f'（要 0x 前缀或十进制）')
+        if value <= 0:
+            raise SystemExit(
+                f'错误：--old-rva {name} 必须是正数，收到 {value}'
+                f'（0 = "该服务器未定位"，拿它当旧 RVA 没有意义）')
+        out[name] = value
+    return out
+
+
+def plan_fingerprint(consts: dict, failures: list, todo: list,
+                     new_exe: str) -> tuple[int | None, str]:
+    """决定这次要不要把新 exe 的指纹写回源码：返回 (值或 None, 一句给人看的原因)。
+
+    ★ 只在**全部常量都迁移成功**时才登记。Fingerprint 的语义是"源码里这些 RVA 属于这一版
+      exe"；有任何一个没迁上还写它，下一版拿到的是"版本对得上、地址却过期"的假绿灯 ——
+      比不登记危险得多（C# 侧只剩序言校验能兜，而那是最不可靠的一环）。
+    """
+    if 'Fingerprint' not in consts:
+        return None, '· 源码是旧格式（RvaSet 里没有 Fingerprint 字段），跳过指纹登记'
+    if failures or not todo:
+        return None, '· 有常量没迁移成功，本次不写回 Fingerprint（避免登记成假绿灯）'
+    try:
+        fingerprint = exe_fingerprint(new_exe)
+        if fingerprint is None:
+            declared, actual = head_span(new_exe)
+            return None, (f'⚠ 头部声明 SizeOfHeaders={declared} > 实际可读 {actual} 字节，'
+                          f'跳过指纹登记（RVA 仍然照常迁移）')
+    except OSError as exc:
+        return None, f'⚠ 算新 exe 指纹失败（本次不写 Fingerprint）：{exc}'
+    return fingerprint, ''
 
 
 def ask(prompt: str, default: bool = False) -> bool:
@@ -236,7 +380,20 @@ def main() -> int:
     ap.add_argument('--build', action='store_true', help='写回后运行 build.bat')
     ap.add_argument('--force', action='store_true',
                     help='新 exe 与缓存的旧 exe 完全相同时也照跑（默认认为没更新，直接退出）')
+    ap.add_argument('--old-rva', dest='old_rva', action='append', default=[],
+                    metavar='NAME=0xHEX',
+                    help='手给某个常量的旧 RVA（可重复）。源码里该常量是 0（上次迁移失败、'
+                         'C# 侧按"未定位"跳过）时用它，否则这一项没有可迁移的起点；'
+                         '旧值可从 Application.cs.bak-<时间戳> 或 git 里抄。'
+                         '例：--old-rva NativeSetFile=0x070538C0')
     a = ap.parse_args()
+
+    # 参数错误要在解析几百 MB 的 exe 之前就报出来（也保证退出码是 2 而不是 1）。
+    try:
+        overrides = parse_old_rva(a.old_rva)
+    except SystemExit as exc:
+        print(str(exc) or '错误：--old-rva 参数非法', file=sys.stderr)
+        return EXIT_PARAM
 
     new_exe = find_new_exe(a.new_opt or a.new_exe)
     if not new_exe:
@@ -299,13 +456,59 @@ def main() -> int:
     md = Cs(CS_ARCH_X86, CS_MODE_64)
     md.detail = True
 
-    todo = [n for n in FUNCTION_ORDER if consts.get(n)]
-    print(f'\n待迁移 {len(todo)} 个常量（按 {os.path.basename(SOURCE)} 里的现值当"旧 RVA"）\n')
+    # 参照 exe 的身份核对：源码登记的 Fingerprint 应该是**旧 exe**（迁移参照）的指纹。
+    # 对不上 = 拿错了参照（例如 rva_cache 里已经是上一版），此时"旧 RVA"和参照二进制不是
+    # 同一份，迁移出的地址没有意义 —— 必须说清楚，不能让它悄悄跑完。
+    registered = consts.get('Fingerprint', 0)
+    old_fp, old_fp_readable = None, True
+    try:
+        old_fp = exe_fingerprint(old_exe)
+    except OSError as exc:
+        old_fp_readable = False
+        print(f'  ⚠ 读旧 exe 指纹失败（继续）：{exc}')
+    if old_fp is None and old_fp_readable:
+        # 与 plan_fingerprint 同一句话：算出来的数两边不可能一致，那就不算（不许凑）。
+        declared, actual = head_span(old_exe)
+        print(f'  ⚠ 头部声明 SizeOfHeaders={declared} > 实际可读 {actual} 字节，'
+              f'跳过指纹登记（RVA 仍然照常迁移）')
+    elif old_fp is not None:
+        if not registered:
+            print(f'  · {which}.Fingerprint 未登记（0）：跳过参照核对，旧 exe 指纹 '
+                  f'0x{old_fp:08X}')
+        elif registered != old_fp:
+            print(f'  ⚠ {which}.Fingerprint = 0x{registered:08X}，但旧 exe 实际是 '
+                  f'0x{old_fp:08X} —— 参照 exe 与源码登记的不是同一版，迁移结果可能对不上'
+                  f'源码里的 RVA（先确认 --old / rva_cache 里放的是不是上一版）')
+
+    for name in overrides:
+        if name not in FUNCTION_ORDER:
+            print(f'  ⚠ --old-rva 里的 {name} 不在迁移清单 {FUNCTION_ORDER} 里，忽略')
+
+    # 逐个常量决定"拿什么当旧 RVA"。源码里是 0 的项不再静默跳过：那是上一轮迁移的
+    # 失败痕迹，静默跳过等于把"这一版没钩子"当成结论。
+    todo = []
+    for name in FUNCTION_ORDER:
+        cur = consts.get(name, 0)
+        if name in overrides:
+            if cur and overrides[name] != cur:
+                print(f'  ⚠ {name}: 源码 0x{cur:08X} 与 --old-rva 0x{overrides[name]:08X} '
+                      f'不一致 → 按 --old-rva 迁移')
+            elif not cur:
+                print(f'  · {name}: 源码里是 0（上次迁移未定位）→ 用 --old-rva '
+                      f'0x{overrides[name]:08X} 当旧 RVA')
+            todo.append(name)
+        elif cur:
+            todo.append(name)
+        else:
+            print(f'  ⚠ {name}: 源码里 RVA = 0（"该服务器未定位此钩子"），没有可用的旧地址 → 跳过')
+            print(f'     恢复办法：从 {os.path.basename(SOURCE)}.bak-<时间戳> 或 git 里抄回'
+                  f'上一版的值，再用 --old-rva {name}=0x<旧RVA> 重跑本脚本')
+    print(f'\n待迁移 {len(todo)} 个常量（源码现值或 --old-rva 当"旧 RVA"）\n')
 
     rows = []
     anchor_delta = None
     for name in todo:
-        old_rva = consts[name]
+        old_rva = overrides.get(name) or consts[name]
         res = migrate(md, spe, dpe, sbounds, dbounds, name, old_rva)
         new_rva, why = pick(res)
         row = dict(name=name, old=old_rva, new=new_rva, why=why, res=res)
@@ -378,11 +581,24 @@ def main() -> int:
             print(f'    · {name}: {why}')
         if zeroed:
             print(f'  这 {len(zeroed)} 项会写成 0 = 运行时"未定位 → 跳过"（不会打下错的补丁）。')
-            print('  想手工救：看 .bak-<时间戳> 备份里的旧值，或用 tools\\align_class.py 整类对齐。')
+            print('  想手工救：从 Application.cs.bak-<时间戳> 或 git 里抄回旧 RVA，'
+                  '再用 --old-rva <名字>=0x<旧RVA> 重跑本脚本。')
         print('  只用到 NativeSetFile 的话，它迁移成功就够了。')
     if not updates:
+        # ★ 这个早退必须在"登记指纹"之前判断：否则 NF 失败、只有 Fingerprint 可写时，
+        #   脚本会写成一次"成功"，而地址其实没迁上（下次就靠这个假指纹骗过版本核对）。
         print('没有可写回的常量，退出。')
         return EXIT_PARTIAL
+
+    # Fingerprint 是"源码里这些 RVA 属于这一版 exe"的断言，所以只在**全部常量都迁移成功**
+    # 时才登记；有任何一个没迁上还写它，下一版拿到的是"版本对得上、地址却过期"的假绿灯。
+    fp_written, fp_why = plan_fingerprint(consts, failures, todo, new_exe)
+    if fp_why:
+        print(f'  {fp_why}')          # 原因自带 · / ⚠ 前缀，别在这里再加一层
+    if fp_written is not None:
+        updates['Fingerprint'] = fp_written
+        print(f'  指纹：{which}.Fingerprint 0x{consts.get("Fingerprint", 0):08X} → '
+              f'0x{fp_written:08X}（新 exe 头部 SizeOfHeaders 字节的 CRC32）')
 
     # 只有"文件名的那个钩子"（NF）是默认运行的关键；它失败才算硬失败。
     # 诊断类常量没迁上只给警告 —— 双击场景下不该因为 GMK_FULL 的诊断项变红。
@@ -391,7 +607,9 @@ def main() -> int:
         print('\n--dry-run：不写源码。')
         return EXIT_PARTIAL if critical else EXIT_OK
 
-    if not a.yes and not ask(f'把上面 {len(updates)} 项写回 {_rel(SOURCE)}？[y/N] '):
+    if not a.yes and not ask(f'把上面 {len(updates)} 项'
+                             f'{"（含 Fingerprint 指纹登记）" if fp_written is not None else ""}'
+                             f'写回 {_rel(SOURCE)}？[y/N] '):
         print('已取消（未改动源码）。')
         return EXIT_PARTIAL
 
@@ -418,7 +636,12 @@ def main() -> int:
         rc = subprocess.call([os.path.join(ROOT, 'build.bat')], cwd=ROOT, shell=True)
         print(f'  build.bat 退出码：{rc}' + ('（成功）' if rc == 0 else '（失败，看上面输出）'))
         if rc != 0:
-            return EXIT_PARTIAL
+            # 这里源码**已经写回**了：报 EXIT_PARTIAL 会让 cmd 说"源码未改动"，
+            # 用户带着旧认知重跑迁移，而此时的"旧 RVA"已经是刚写进去的新值。
+            print(f'  注意：源码**已写回**（备份 '
+                  f'{os.path.basename(backup) if backup else "无（本次值没变）"}），'
+                  f'只是编译失败 —— 先按上面的错误修 build，别重跑迁移。')
+            return EXIT_BUILD_FAILED
     else:
         print('  双击 build.bat 重新编译部署（或下次更新加 --build 自动跑）。')
     print('  实跑一轮验证：日志里应只有 1 行 hook NativeMethods_SetFile，播放能看到 ★★ 已配对。')

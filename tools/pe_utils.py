@@ -35,8 +35,8 @@ from typing import Optional
 import pefile
 
 __all__ = [
-    'PEFormatError', 'RvaError', 'Section', 'PEFile', 'load_pe', 'image_base',
-    'parse_int', 'hexfmt', 'emit_json', 'json_aware_main',
+    'PEFormatError', 'RvaError', 'NumpyMissing', 'Section', 'PEFile', 'load_pe',
+    'image_base', 'parse_int', 'hexfmt', 'emit_json', 'json_aware_main',
 ]
 
 # 段特征位
@@ -54,6 +54,10 @@ class PEFormatError(RuntimeError):
 
 class RvaError(ValueError):
     """RVA 无法可靠映射到文件偏移（越界，或落在文件里没有字节的虚拟尾部）。"""
+
+
+class NumpyMissing(RuntimeError):
+    """可选依赖 numpy 缺失（只影响 find_direct_calls，不影响 RVA 迁移链路）。"""
 
 
 @dataclass(frozen=True)
@@ -348,8 +352,17 @@ def find_direct_calls(pe: PEFile, section: Section, targets, *,
     所以「0 处调用」绝不等于「确认无调用者」。
 
     分块是为了避免一次性 materialize 上千万条滑动窗口（原实现会吃掉几百 MB 临时内存）。
+
+    ★ numpy 是**可选**依赖（只给这个函数用，不在 RVA 迁移主链路上）。缺了它时抛带安装
+      提示的 :class:`NumpyMissing`，而**不是**返回空表 —— 空表会被读成"0 处调用"，
+      而本函数恰恰扫不到间接调用，这个误读会直接把人带沟里。
     """
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise NumpyMissing(
+            'find_direct_calls 需要 numpy（可选依赖）：pip install numpy。'
+            '它不在 RVA 迁移链路上，update_rva / migrate_masked / pdata 不受影响。') from exc
 
     targets = list(dict.fromkeys(int(t) for t in targets))
     hits = {t: set() for t in targets}

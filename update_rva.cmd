@@ -13,6 +13,14 @@ rem  double-click this -> confirm -> build.bat to rebuild/deploy.
 rem
 rem  Extra args are passed to tools\update_rva.py, e.g.
 rem    update_rva.cmd --yes --build
+rem    update_rva.cmd --new D:\Genshin\YuanShen.exe --old-rva NativeSetFile=0x070538C0
+rem
+rem  Exit codes reported by tools\update_rva.py:
+rem    0 = success (RVAs written back, or --dry-run finished)
+rem    1 = some hook was NOT migrated (source NOT changed), or you cancelled
+rem    2 = bad arguments / bad environment (missing deps, no old exe, ...)
+rem    3 = source WAS changed, but build.bat failed -> fix the build,
+rem        do NOT re-run the migration (the old RVAs are already gone)
 rem
 rem  KEEP THIS FILE PURE ASCII + CRLF: cmd.exe (GBK codepage) would
 rem  mis-parse non-ASCII bytes and break the script.
@@ -35,9 +43,22 @@ set RC=%ERRORLEVEL%
 echo.
 if "%RC%"=="0" (
     echo [OK] RVA updated.
-) else (
-    echo [FAILED] exit code %RC% - see the messages above. Source NOT changed.
+    goto :done
 )
+if "%RC%"=="3" (
+    echo [PARTIAL] exit code 3 - RVA written back, but build.bat FAILED.
+    echo           The source IS changed. Fix the build error, then rebuild.
+    echo           Do NOT re-run this migration: the old RVAs are already overwritten.
+    goto :done
+)
+if "%RC%"=="1" (
+    echo [FAILED] exit code 1 - a hook was not migrated, or you cancelled.
+    echo          Source NOT changed. See the messages above.
+    goto :done
+)
+echo [FAILED] exit code %RC% - see the messages above.
+echo          exit code 2 = bad arguments / environment (Python deps first).
+:done
 popd
 pause
 endlocal & exit /b %RC%

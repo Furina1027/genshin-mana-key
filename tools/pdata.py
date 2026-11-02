@@ -11,12 +11,13 @@
 
 用途：在 il2cpp 段里做「精确定点」——已知若干锚点函数的 RVA 后，
       可以直接列出它们附近的全部函数（新版本新增的函数就在其中）；
-      也可以给指纹匹配（align_class / migrate_masked）提供**函数边界**，
+      也可以给指纹匹配（migrate_masked）提供**函数边界**，
       避免指纹跨越到下一个函数里去。
 
 本模块同时是一个可复用的边界表接口：``load_function_bounds(pe)`` 返回
 :class:`FunctionBounds`，提供 ``containing()/end_of()/slice_limit()/in_range()``，
-供 migrate_masked.py 与 align_class.py 直接调用。
+供 update_rva.py 与 migrate_masked.py 直接调用。（历史上的"整类对齐"脚本 align_class.py
+已随 2026-10-25 瘦身删除 —— ede0c7f，历史见 git。）
 
 修掉的老问题：
   · ``data[ro:ro + min(rsz, vsz)]`` 会在 VirtualSize < SizeOfRawData 时**静默丢掉
