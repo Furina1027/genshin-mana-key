@@ -282,11 +282,15 @@ class ExeFingerprintTest(unittest.TestCase):
         self.assertTrue(0 <= fp <= 0xFFFFFFFF)
 
     def test_known_baseline_of_the_cached_exe(self):
-        """对拍基线：rva_cache\\YuanShen.exe（7.1 国服）SizeOfHeaders=0x400 → 0xC66689B9。
+        """对拍基线：rva_cache\\YuanShen.exe（当前缓存 = 7.2 国服）SizeOfHeaders=0x400 → 0x88FB991A。
 
-        只在真 exe 存在时断言（0xC66689B9 / 0x400 都是这一版客户端的实测值，别在别处写死）；
+        只在真 exe 存在时断言（0x88FB991A / 0x400 都是这一版客户端的实测值，别在别处写死）；
         其余用例一律用合成 PE 自己的 SizeOfHeaders 推期望值。这条一旦红，说明"源码登记的
         版本"和"缓存里的参照 exe"不是同一版（或是口径又漂了）。
+
+        ⚠ 这是**会随游戏更新变化的锚**：rva_cache 换了，这里和
+        `ManaKeyDumper.Tests/VersionGuardTests.Cached_client_header_matches_registered_fingerprint`
+        两处期望值要一起换（7.1 时是 0xC66689B9）。
         """
         cached = os.path.join(ROOT, 'rva_cache', 'YuanShen.exe')
         if not os.path.isfile(cached):
@@ -294,7 +298,7 @@ class ExeFingerprintTest(unittest.TestCase):
         with open(cached, 'rb') as fh:
             head = fh.read(0x1000)
         self.assertEqual(update_rva.fingerprint_length(head), 0x400)
-        self.assertEqual(update_rva.exe_fingerprint(cached), 0xC66689B9)
+        self.assertEqual(update_rva.exe_fingerprint(cached), 0x88FB991A)
 
     def test_missing_file_raises_oserror(self):
         with self.assertRaises(OSError):

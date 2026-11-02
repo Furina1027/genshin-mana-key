@@ -141,10 +141,13 @@ public sealed class VersionGuardTests {
     }
 
     /// <summary>
-    /// 与真实 7.1 国服客户端对拍：DLL 实际调用的 `TryHashHeader` 必须给出 `0xC66689B9`（长度 0x400）。
-    /// 顺带留证两个"不能用的口径"：
-    ///   · 文件前 64KB = `0xE597A764`（镜像里那段被 0 填充，算出来又是别的值）；
-    ///   · 内存镜像头 1KB 也不可信 —— 2026-11-02 实跑得到 `0x9735915B`，因为保护壳改写了它，
+    /// 与 `rva_cache\YuanShen.exe`（当前缓存的国服客户端 = 7.2）对拍：DLL 实际调用的
+    /// `TryHashHeader` 必须给出 `0x88FB991A`（长度 0x400 = `SizeOfHeaders`）。
+    ///
+    /// ⚠ 这是**锚**：`rva_cache` 每随游戏更新换一次，这里的期望值就要同步换
+    /// （7.1 是 `0xC66689B9`）。顺带留证两个"不能用的口径"：
+    ///   · 文件前 64KB = `0x8CB60F3D`（7.1 是 `0xE597A764`）—— 镜像里那段被 0 填充，算出来又是别的值；
+    ///   · 内存镜像头 1KB 也不可信（7.1 实跑得到 `0x9735915B`，保护壳改写了它），
     ///     所以 DLL 现在判定只读**磁盘文件**。
     /// 没有 rva_cache 时直接返回（不是失败）。
     /// </summary>
@@ -162,14 +165,12 @@ public sealed class VersionGuardTests {
         // 走 DLL 真正用的那条路径
         Assert.True(VersionGuard.TryHashHeader(probe, out var crc, out var length));
         Assert.Equal(0x400, length);
-        Assert.Equal(0xC66689B9u, crc);
+        Assert.Equal(0x88FB991Au, crc);
 
         // 坑的留证：文件前 64KB 是另一个值，且**不能**当指纹用
         var sixtyFourK = VersionGuard.Crc32(probe);
-        Assert.Equal(0xE597A764u, sixtyFourK);
+        Assert.Equal(0x8CB60F3Du, sixtyFourK);
         Assert.NotEqual(sixtyFourK, crc);
-        // 实跑观察到、但**不可复现于文件**的内存镜像值（保护壳改写）——记在这里防止有人再拿它当基准
-        Assert.NotEqual(0x9735915Bu, crc);
     }
 
     /// <summary>造一个结构合法的 PE32+ 头部（只填指纹判定需要的字段，其余留 0）。</summary>

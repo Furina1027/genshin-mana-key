@@ -71,7 +71,7 @@ internal static unsafe class Application {
         public string Name = "";
 
         /// <summary>
-        /// 这一版 exe 的版本指纹（头 64KB 的 CRC32，见 <see cref="VersionGuard"/>）。
+        /// 这一版 exe 的版本指纹 = CRC32(exe 头部 **SizeOfHeaders** 字节)，见 <see cref="VersionGuard"/>。
         /// **0 = 未登记**，不是错误：此时只能靠四道门自保，日志会说明。
         /// 由 tools\update_rva.py 在迁移成功后自动写回，所以它和 NativeSetFile 永远是同一版的。
         /// </summary>
@@ -81,16 +81,26 @@ internal static unsafe class Application {
     }
 
     /// <summary>
-    /// 国服 7.1（YuanShen.exe）。已用「国际服 7.1 全量 idx→RVA 表 + 国服实测锚点标定位移 0x3120」
-    /// 反查确认，并与 genshin-metadata/cn/out/methods.csv（idx75746）逐一核对一致。
-    /// Fingerprint = 0xC66689B9 = CRC32(exe 头 SizeOfHeaders=0x400 字节)，已用
-    /// rva_cache\YuanShen.exe（7.1 国服）实际算过；注意它**不等于**"文件前 64KB 的 CRC32"
-    /// （那是 0xE597A764，在内存镜像里算不出来，见 VersionGuard 的口径说明）。
+    /// 国服 `YuanShen.exe`（**当前 7.2**）。
+    ///
+    /// 7.1 那份值的来历：用「国际服 7.1 全量 idx→RVA 表 + 国服实测锚点标定位移 0x3120」反查，
+    /// 并与 genshin-metadata/cn/out/methods.csv（idx75746）逐一核对一致。
+    ///
+    /// 7.2 这份值（2026-11-02）由 tools\update_rva.py 的掩码指纹迁移得到：`0x070538C0 → 0x0717D410`，
+    /// 唯一命中，并在落盘前做了三项静态复核：
+    ///   ① 新地址落在 `.pdata` 异常目录的函数起点（size=231）；
+    ///   ② 函数体与 7.1 **逐字节一致**：231 字节 / 57 条指令，只有 imm/disp 共 112 字节被通配，固定字节 0 处不同；
+    ///   ③ `il2cpp` 段内该函数的唯一 `E8` 直接调用点位于函数起点 −0x25，与 7.1 同一相对位置。
+    /// 实机验证见 dumper.log 的 `hook NativeMethods_SetFile @ …` 与 `★★ 已配对`。
+    ///
+    /// Fingerprint = 0x88FB991A = CRC32(exe 头 SizeOfHeaders=0x400 字节)。注意它**不等于**
+    /// "文件前 64KB 的 CRC32"（7.2 是 0x8CB60F3D；7.1 分别为 0xC66689B9 / 0xE597A764），
+    /// 口径理由见 VersionGuard 的类注释。
     /// </summary>
     private static readonly RvaSet Cn = new() {
-        Name = "国服 YuanShen.exe 7.1",
-        Fingerprint = 0xC66689B9,
-        NativeSetFile = 0x070538C0,
+        Name = "国服 YuanShen.exe 7.2",
+        Fingerprint = 0x88FB991A,
+        NativeSetFile = 0x0717D410,
     };
 
     /// <summary>

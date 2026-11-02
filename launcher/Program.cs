@@ -30,7 +30,9 @@ internal static class Program {
         // 默认是 GUI 子系统，双击时**不会出现任何控制台/命令行窗口**。
         Log.AttachConsoleIfRequested();
         Log.Write("========================================");
-        Log.Write("GenshinManaKey - 原神 7.1 过场动画密钥截获 (CRI Mana / AES_HCA)");
+        // 标题不写死游戏版本：RVA 由注入 DLL 的 RvaSet.Fingerprint + update_rva.cmd 维护，
+        // 写死版本号只会让日志在下次更新后先自相矛盾。具体版本看下一行的"版本指纹"日志。
+        Log.Write("GenshinManaKey - 原神过场动画密钥截获 (CRI Mana / AES_HCA)");
         Log.Write("  hook: bcrypt.dll!BCryptGenerateSymmetricKey（唯一的 key 来源）");
         Log.Write("        bcrypt.dll!BCryptEncrypt（密钥流验证）");
         Log.Write("        NativeMethods_SetFile（唯一的文件名来源；默认唯一挂的 il2cpp 钩子）");

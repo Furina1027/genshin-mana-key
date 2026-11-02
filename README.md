@@ -1,7 +1,10 @@
-# GenshinManaKey — 原神 7.1 过场动画（USM / CRI Mana）解密密钥截获工具
+# GenshinManaKey — 原神过场动画（USM / CRI Mana）解密密钥截获工具
 
 Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播放时截获**最终解密密钥**，
 并按"正在播放的文件"自动配对，直接产出可并入 key 库的 JSON。
+
+> 版本适配：**国服 7.2 已迁（`0x0717D410`），国际服仍是 7.1 的值（未复核）**。
+> 每次游戏更新只需双击 `update_rva.cmd`，详见「版本更新后怎么把这些 RVA 重新找回来」。
 
 结构仿照崩铁的 `hsr-mana-key`（本身就是仿 `YaeAchievement` 的注入框架）。
 
@@ -31,11 +34,16 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 ## Hook 一览（RVA 相对 exe 基址）
 
-| 钩子 | 方法 | 国服 YuanShen.exe | 国际服 GenshinImpact.exe | 默认挂 |
+| 钩子 | 方法 | 国服 YuanShen.exe（**7.2**） | 国际服 GenshinImpact.exe（**7.1，未复核**） | 默认挂 |
 |---|---|---|---|---|
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x070538C0` | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）**；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x0717D410`（7.1 是 `0x070538C0`） | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）**；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
 | — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **key 本体**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 | — | `bcrypt.dll!BCryptEncrypt` → 密钥流验证（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
+
+> **7.2 的迁移（2026-11-02）**：`update_rva.py` 掩码指纹唯一命中 `0x070538C0 → 0x0717D410`，
+> 落盘前三项静态复核全过 —— ① 落在 `.pdata` 函数起点；② 函数体 231 字节 / 57 条指令，
+> 与 7.1 **逐字节一致**（只有 imm/disp 共 112 字节被通配，固定字节 0 处不同）；
+> ③ `il2cpp` 段内唯一 `E8` 直接调用点在函数起点 −0x25，与 7.1 同一相对位置。
 
 > **v20（2026-10-24）起诊断钩子全部删除。** 原有的 S2/S3/N2/N3 四个 MANAKEY 钩子与
 > 9 个 GMK_FULL 侦察钩子实测（2026-10-16 多轮日志）要么 0 次调用、要么只服务逆向调查，
@@ -145,7 +153,7 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 指纹机制不改任何挂钩行为，只负责把这种状态**在启动第一秒就喊出来**。
 
 **口径**：`CRC32(exe **磁盘文件**头部 SizeOfHeaders 字节)`（标准 zlib 口径：反射输入输出、多项式 `0xEDB88320`、
-初值全 1、结果取反）。7.1 国服 `SizeOfHeaders = 0x400` → 登记值 `0xC66689B9`。
+初值全 1、结果取反）。国服 `SizeOfHeaders = 0x400` → 当前（7.2）登记值 `0x88FB991A`（7.1 时是 `0xC66689B9`）。
 `VersionGuard.FingerprintBytes = 0x10000` 只是**上限**（防畸形 `SizeOfHeaders` 把 CRC 拖成整文件）：
 实际长度由 `VersionGuard.FingerprintLength` 从头部读 —— 判据 `0x40 ≤ e_lfanew ≤ 0x1000`、签名 `PE\0\0`、
 `0x200 ≤ SizeOfHeaders ≤ 0x10000`，任一不过就兜底 `0x400`。登记值在
@@ -153,12 +161,12 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 
 | 常量集 | `Fingerprint` | 说明 |
 |---|---|---|
-| `Cn`（国服 `YuanShen.exe`） | `0xC66689B9` | `SizeOfHeaders = 0x400`；已用 `rva_cache\YuanShen.exe`（7.1 国服）实算复核 |
+| `Cn`（国服 `YuanShen.exe`） | `0x88FB991A` | 7.2，`SizeOfHeaders = 0x400`；由 `update_rva.py` 迁移时写入（7.1 是 `0xC66689B9`） |
 | `Gl`（国际服 `GenshinImpact.exe`） | `0x00000000` | **未登记**：本机没有国际服客户端，没实测就不填（编一个假指纹比不填更糟） |
 
 **判定只认磁盘文件，内存镜像只作参照**（这是 2026-11-02 实跑踩出来的第二个坑）：
 带保护壳的客户端（本 exe 有 `.tls` 段 + TLS 目录）会在**注入线程启动时先跑 TLS 回调**，等 DLL 读头部时，
-内存里那 1KB 早被壳改写过 —— 同一版客户端实测：**磁盘 `0xC66689B9` / 内存 `0x9735915B`**（同长度、同算法）。
+内存里那 1KB 早被壳改写过 —— 7.1 实跑实测：**磁盘 `0xC66689B9` / 内存 `0x9735915B`**（同长度、同算法）。
 若拿内存值比对，就会每次启动都误报"游戏已更新"，而且一开 `GMK_STRICT=1` 就会**误杀 NF**
 （NF 挂了不上 → 文件名归属全丢 → 所有 `BCKEY` 因 `file=?` 被拒收，密钥库一个字都写不进去）。
 
@@ -170,7 +178,7 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 
 **为什么不用"文件头 64KB"**：`FileAlignment = 0x200 ≠ SectionAlignment = 0x1000`，所以**内存镜像的前 64KB
 与文件前 64KB 不是同一段字节** —— 镜像里 `[SizeOfHeaders, 0x1000)` 是 0 填充，文件里那段是 `.text` 数据。
-实测 `rva_cache\YuanShen.exe`：**文件前 64KB CRC32 = `0xE597A764`，模拟内存镜像前 64KB CRC32 = `0xF1CC54E7`**。
+实测：**7.2 文件前 64KB CRC32 = `0x8CB60F3D`（判定用的头 0x400 是 `0x88FB991A`），7.1 则是 `0xE597A764` 与 `0xC66689B9`**。
 长度取 `SizeOfHeaders` 之后，文件与镜像的 `[0, SizeOfHeaders)` 本来逐字节一致（保护壳改写是后来的事，
 所以才把判定挪到文件上）。
 
@@ -182,7 +190,7 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 
 | 实测 vs 登记（**磁盘**） | 日志（`N` = 本次实际取的字节数，十进制） |
 |---|---|
-| 相等 | `版本指纹匹配 0xC66689B9（这版 RVA 属于这个 exe）（口径：exe 头 1024 字节）` |
+| 相等 | `版本指纹匹配 0x88FB991A（这版 RVA 属于这个 exe）（口径：exe 头 1024 字节）` |
 | 登记为 `0` | `版本指纹未登记（实测 0x…）：无法校验 RVA 是否属于本版本，只能靠四道门（可执行节/可读/序言）自保。跑一次 tools\update_rva.cmd 即可登记（口径：exe 头 N 字节）` |
 | 不等 | `⚠ 版本指纹不匹配：实测 0x…，源码登记 0x… —— 游戏已更新？请先跑 tools\update_rva.cmd；残留旧 RVA 会把补丁打到别的函数上（口径：exe 头 N 字节）` |
 
@@ -190,20 +198,22 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 —— 两个数不一样是**正常的**，正是它解释了"为什么判定非要读文件"。
 
 末尾的 `（口径：exe 头 N 字节）` 是 `VersionGuard.Describe(state, actual, expected, length)` 的 `length`
-（`Application.CheckVersion` 传实际长度，7.1 国服 = `0x400` → "1024 字节"）。它存在的理由：
-**"口径被改坏"这件事在日志里能立刻看见** —— 按 64KB 取会得到 `0xF1CC54E7`、文件里却是 `0xE597A764`，
+（`Application.CheckVersion` 传实际长度，国服 = `0x400` → "1024 字节"）。它存在的理由：
+**"口径被改坏"这件事在日志里能立刻看见** —— 按 64KB 取会得到 `0x8CB60F3D`、判定用的却是 `0x88FB991A`，
 而带后缀的行一眼就能看出"这轮到底算了多少字节"，不用回头翻源码。
 
 （还有一条"读不到 exe 文件（…），跳过校验"—— 文件读不出来时只靠四道门。）
 
-> **同一个 exe 的四个数，别混用**（C# 与 Python 两侧都按第 2 行实现；测试把第 1、3、4 行钉成了"反例断言"）：
+> **这些数别混用**（C# 与 Python 两侧都按第 1 行实现，测试把"64KB / 内存镜像"那几行钉成了反例断言）：
 >
 > | 数值 | 是什么 | 能不能当指纹 |
 > |---|---|---|
-> | `0xE597A764` | **文件**前 64KB 的 CRC32（历史/CDN 核对值） | ❌ 不能（镜像同区间是 `0xF1CC54E7`） |
-> | `0xC66689B9` | **文件**头 `SizeOfHeaders`（0x400）字节的 CRC32 | ✅ 就是 `RvaSet.Fingerprint` 登记值，也是判定用的那个 |
-> | `0xF1CC54E7` | **内存镜像**前 64KB 的 CRC32（按 64KB 取值时的模拟结果） | ❌ 不能（文件里是 `0xE597A764`） |
-> | `0x9735915B` | **内存镜像**头 1KB 的 CRC32（2026-11-02 实跑实测） | ❌ 不能（保护壳改写了头部，无法从文件复现） |
+> | `0x88FB991A` | **文件**头 `SizeOfHeaders`（0x400）字节的 CRC32 —— **7.2 当前登记值** | ✅ 判定用的就是它 |
+> | `0xC66689B9` | 同口径，**7.1** 的登记值（历史） | ⚠ 只对 7.1 有效；7.2 下会正确报"不匹配" |
+> | `0x8CB60F3D` | **文件**前 64KB 的 CRC32（7.2） | ❌ 不能（镜像里那段是 0 填充，算出来是别的值） |
+> | `0xE597A764` | **文件**前 64KB 的 CRC32（7.1，当年手工核对 CDN 指纹用过） | ❌ 同上 |
+> | `0xF1CC54E7` | **内存镜像**前 64KB 的 CRC32（按 64KB 取值时的模拟结果） | ❌ 不能（文件里不是这个值） |
+> | `0x9735915B` | **内存镜像**头 1KB 的 CRC32（7.1 实跑实测） | ❌ 不能（保护壳改写了头部，无法从文件复现） |
 
 **默认只警告、照挂**，不改变任何挂钩行为。理由很实际：一次正常更新后如果忘了跑 `update_rva.cmd`，
 用户至少还能拿到 key（只是没有文件名归属，`BCKEY file=?`）；把"宁可少挂也不打错补丁"的选择权
@@ -573,8 +583,8 @@ set LIB=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\
 
 - 客户端确认是 **7.1 国服**（exe 头 64KB CRC32 `0xE597A764`，与官方 CDN 下发的国服指纹一致）；
   *（口径提醒：这个 `0xE597A764` 是**文件前 64KB** 的 CRC32、当时手工核对 CDN 指纹用的。
-  现在 `RvaSet.Fingerprint` 用的是 `SizeOfHeaders` 字节口径 = `0xC66689B9`，**两个数别混用** ——
-  镜像前 64KB 又是第三个数 `0xF1CC54E7`。原因见「版本指纹（自证）」一节。）*
+  7.1 的 `RvaSet.Fingerprint` 用的是 `SizeOfHeaders` 字节口径 = `0xC66689B9`（现在是 7.2 的 `0x88FB991A`），
+  **这些数别混用** —— 镜像前 64KB 又是第三个数 `0xF1CC54E7`。原因见「版本指纹（自证）」一节。）*
 - 触发的文件是 `Cs_ZD_AQ70201201_SLT.usm` / `Cs_ZD_AQ70201101_RTF_Girl.usm`，
   **md5 与我们手上的样本完全一致**（就是那 11 个目标里的两个）；
 - 但 **4 个设密钥函数 0 次调用**。
