@@ -647,7 +647,8 @@ def main() -> int:
             return EXIT_BUILD_FAILED
     else:
         print('  双击 build.bat 重新编译部署（或下次更新加 --build 自动跑）。')
-    print('  实跑一轮验证：日志里应只有 1 行 hook NativeMethods_SetFile，播放能看到 ★★ 已配对。')
+    print('  实跑一轮验证：日志里应有 2 行 hook（NativeMethods_SetFile + CriwareMediaPlayer 设钥函数），'
+          '播放能看到 ★★ 已配对。')
     return EXIT_PARTIAL if critical else EXIT_OK
 
 

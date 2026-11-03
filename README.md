@@ -8,7 +8,8 @@ Hook 游戏内 CRI Mana 播放器真正走的设 key 路径，在过场动画播
 > 实际是 xref 扫错了地址（`0x07054B80` 是 `Player.UpdateWithUserTime`，正确的是 `0x070548F0`）。
 > 详见下面「为什么音频 key 以前抓不到」。
 >
-> 版本适配：**国服 7.2 已迁（`0x0717D410` / MP `0x13140020`），国际服仍是 7.1 的值（未复核）**。
+> 版本适配：**国服 7.2 已迁（`0x0717D410` / MP `0x13140020`），国际服 7.2 也已适配
+> （`0x0717CE80` / MP `0x1314CE80`，指纹 `0x86F06D52`）**。
 > 每次游戏更新只需双击 `update_rva.cmd`，详见「版本更新后怎么把这些 RVA 重新找回来」。
 
 结构仿照崩铁的 `hsr-mana-key`（本身就是仿 `YaeAchievement` 的注入框架）。
@@ -39,10 +40,10 @@ Hook 游戏内 CRI Mana 播放器真正走的设 key 路径，在过场动画播
 
 ## Hook 一览（RVA 相对 exe 基址）
 
-| 钩子 | 方法 | 国服 YuanShen.exe（**7.2**） | 国际服 GenshinImpact.exe（**7.1，未复核**） | 默认挂 |
+| 钩子 | 方法 | 国服 YuanShen.exe（**7.2**） | 国际服 GenshinImpact.exe（**7.2**） | 默认挂 |
 |---|---|---|---|---|
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x0717D410`（7.1 是 `0x070538C0`） | `0x070507A0` | ★ 是；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
-| MP | `MoleMole.CriwareMediaPlayer.<混淆名>` → **音频 key + 旧 videoKey** | `0x13140020`（7.1 是 `0x12DD42B0`） | `0x12DA2A40`（7.1） | ★ 是（第 2 个 il2cpp 补丁；RVA=0 时跳过） |
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x0717D410`（7.1 是 `0x070538C0`） | `0x0717CE80`（7.1 是 `0x070507A0`） | ★ 是；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
+| MP | `MoleMole.CriwareMediaPlayer.<混淆名>` → **音频 key + 旧 videoKey** | `0x13140020`（7.1 是 `0x12DD42B0`） | `0x1314CE80`（7.1 是 `0x12DA2A40`） | ★ 是（第 2 个 il2cpp 补丁；RVA=0 时跳过） |
 | — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **视频 AES key**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 | — | `bcrypt.dll!BCryptEncrypt` → 密钥流验证（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 
@@ -230,7 +231,7 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 | 常量集 | `Fingerprint` | 说明 |
 |---|---|---|
 | `Cn`（国服 `YuanShen.exe`） | `0x88FB991A` | 7.2，`SizeOfHeaders = 0x400`；由 `update_rva.py` 迁移时写入（7.1 是 `0xC66689B9`） |
-| `Gl`（国际服 `GenshinImpact.exe`） | `0x00000000` | **未登记**：本机没有国际服客户端，没实测就不填（编一个假指纹比不填更糟） |
+| `Gl`（国际服 `GenshinImpact.exe`） | `0x86F06D52` | 7.2，`SizeOfHeaders = 0x400`；由 `update_rva.py` 从国际服 7.1 exe 迁移时登记（7.1 是 `0x219CAA99`） |
 
 **判定只认磁盘文件，内存镜像只作参照**（这是 2026-11-02 实跑踩出来的第二个坑）：
 带保护壳的客户端（本 exe 有 `.tls` 段 + TLS 目录）会在**注入线程启动时先跑 TLS 回调**，等 DLL 读头部时，
@@ -289,7 +290,7 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `GMK_STRICT=1` | 关 | **只有**"指纹已登记但与当前 exe 不符（`Mismatch`）"时**跳过 NF/MP 两个 il2cpp 钩子**（bcrypt 的 2 个不拦）；默认只警告、照挂。"未登记"（登记值 `0`，例如国际服）**不拦** —— 否则这个开关会让人一个钩子都挂不上，比不检查更糟 |
+| `GMK_STRICT=1` | 关 | **只有**"指纹已登记但与当前 exe 不符（`Mismatch`）"时**跳过 NF/MP 两个 il2cpp 钩子**（bcrypt 的 2 个不拦）；默认只警告、照挂。"未登记"（登记值 `0`）**不拦** —— 否则这个开关会让人一个钩子都挂不上，比不检查更糟 |
 
 严格模式的日志形态：`[skip] NativeMethods_SetFile / CriwareMediaPlayer: GMK_STRICT=1 且版本指纹不匹配 → 不挂这两个 il2cpp 钩子（避免把补丁打到别的函数上）。跑 tools\update_rva.cmd 迁移后重试`。
 

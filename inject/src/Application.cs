@@ -122,19 +122,25 @@ internal static unsafe class Application {
     };
 
     /// <summary>
-    /// 国际服 GenshinImpact.exe。来源：README 的 RVA 表（= 国际服 7.1 全量 idx→RVA 表直接读出来的值）。
-    /// Fingerprint = 0（未登记）：本机没有国际服客户端，**没实测过就不填**（编一个假指纹比不填更糟）。
-    /// 写成 <c>0x00000000</c> 而不是裸 <c>0</c>：update_rva.py 的常量正则只认 <c>0x</c> 字面量，
-    /// 写成裸 0 会让这一行既读不到也写不回，国际服就永远登记不上指纹。
-    /// 在国际服客户端上跑一次 update_rva.cmd 会自动补上。
+    /// 国际服 `GenshinImpact.exe`（**当前 7.2**）。
+    ///
+    /// 7.2 的值（2026-11-03）由 `tools\update_rva.py` 用**国际服 7.1 exe** 当参照迁移得到：
+    ///   NF 0x070507A0 → 0x0717CE80（size 231）；
+    ///   MP 0x12DA2A40 → 0x1314CE80（size 1148）。
+    /// 交叉验证：① 7.1 国服→国际服的迁移结果与已知值 `0x070507A0` / `0x12DA2A40` 完全一致；
+    /// ② 7.2 国际服 MP 内同样有 2 处 `E8` 调用 `SetVideoAesKeyAudioDecryptionKey @ 0x0717DEB0`，
+    ///    且 `[this+0xB8/0xC0/0xC8/0xD0]` 的用法与国服一致。
+    ///
+    /// Fingerprint = 0x86F06D52 = CRC32(exe 头 SizeOfHeaders=0x400 字节)，由 update_rva 自动登记。
+    /// 7.1 国际服的指纹是 0x219CAA99（仅作参照）。
     /// </summary>
     private static readonly RvaSet Gl = new() {
-        Name = "国际服 GenshinImpact.exe（7.1 值，未复核）",
-        Fingerprint = 0x00000000,
-        NativeSetFile = 0x070507A0,
-        // 国际服 7.1 的值；7.2 国际服未定位（本机没有客户端，不编造）。
-        // 注意：Gl 整套仍是 7.1 值，且 Fingerprint=0（未登记），跑 7.2 国际服时先跑 update_rva。
-        MediaPlayerKeys = 0x12DA2A40,
+        Name = "国际服 GenshinImpact.exe 7.2",
+        Fingerprint = 0x86F06D52,
+        NativeSetFile = 0x0717CE80,
+        // 真名同样是 CriwareMediaPlayer 的混淆名（7.1 GAKIOOPLFAA → 7.2 未知混淆名）。
+        // 7.1 国际服是 0x12DA2A40；7.2 由掩码指纹迁移得到，唯一命中。
+        MediaPlayerKeys = 0x1314CE80,
     };
 
     /// <summary>主模块候选名 → 决定用哪套 RVA 常量（A7）。</summary>
