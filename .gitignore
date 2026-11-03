@@ -22,3 +22,6 @@ game_path.txt
 # update_rva.cmd 缓存的"上一个版本 exe"（几百 MB，只在本机有意义；
 # *.exe 已忽略，这里显式再标一次，避免以后改了忽略规则把它带进仓库）。
 rva_cache/
+
+# 本地详细文档（不随仓库分发，README 只保留项目简介）。
+docs/
