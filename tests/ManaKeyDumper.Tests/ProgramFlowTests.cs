@@ -105,4 +105,39 @@ public sealed class ProgramFlowTests : IDisposable {
         Assert.Contains("BCKEY #1", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// 2026-11-03 的新链路：BCKEY 写 aes、MANAKEY4 写 audio，**两条都要留在同一条记录里**。
+    /// 这是"只能抓 AES"到"aes+audio 都入库"的端到端回归。
+    /// </summary>
+    [Fact]
+    public void MediaKeysReport_MergesWithBcKey_AndLandsWithAudio() {
+        const string aes = "F5AC17FFE4B4B430553AE073EB8A8A1D";
+        // 文件名不能和别的用例重复：Program.Lines 是静态去重集合，同一行只会被处理一次
+        Feed("BCKEY #1 file=Cs_Merge_Video.usm len=16 " + aes);
+        Feed("MANAKEY4 file=Cs_Merge_Video.usm mode=1 aes=" + aes + " audio=0004BA5069B44BD4");
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(_paired));
+        var entry = doc.RootElement.GetProperty("Cs_Merge_Video");
+        Assert.Equal(aes, entry.GetProperty("aes").GetString());
+        Assert.Equal("0004BA5069B44BD4", entry.GetProperty("audio").GetString());
+    }
+
+    /// <summary>旧体系只写一个 key，格式与 hk4e_keys.json 的旧条目一致（裸字符串）。</summary>
+    [Fact]
+    public void MediaKeysLegacyReport_LandsInPairedKeysJson() {
+        Feed("MANAKEY4 file=Video_Reunion_67.usm mode=0 videoKey=0004CDB4745CD9EF");
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(_paired));
+        var entry = doc.RootElement.GetProperty("Video_Reunion_67");
+        Assert.Equal(JsonValueKind.String, entry.ValueKind);
+        Assert.Equal("0004CDB4745CD9EF", entry.GetString());
+    }
+
+    [Fact]
+    public void MediaKeysRawEvent_IsWrittenToKeysLog() {
+        Feed("MANAKEY4 file=Cs_Raw.usm mode=1 aes=458725216E2CCBCD12961E57B85109A6 audio=0004BA5069B44BD4");
+
+        Assert.Contains("MANAKEY4", File.ReadAllText(_keysLog), StringComparison.Ordinal);
+    }
+
 }

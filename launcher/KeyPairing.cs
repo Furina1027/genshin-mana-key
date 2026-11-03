@@ -2,8 +2,11 @@ using System.Globalization;
 
 namespace GenshinSniffer;
 
-/// <summary>配对种类：Method2 = 7.1 的 AES_HCA（AES + audio），Mask = 旧体系 56 位掩码 videoKey。</summary>
-internal enum PairingKind { Method2, Mask, Aes }
+/// <summary>
+/// 配对种类：Method2 = 7.1 的 AES_HCA（AES + audio），Mask = 旧体系 56 位掩码 videoKey。
+/// Aes = BCKEY（只有视频 AES）；MediaKeys = MANAKEY4（CriwareMediaPlayer：aes / audio / 旧 videoKey 三选一）。
+/// </summary>
+internal enum PairingKind { Method2, Mask, Aes, MediaKeys }
 
 /// <summary>一条可以写盘的结果。用不到的字段是空串（Mask 只填 VideoKey，Method2 只填 Aes/Audio）。</summary>
 internal readonly record struct PairingEntry(
@@ -21,6 +24,8 @@ internal readonly record struct PairingEntry(
 ///   MANAKEYN3 [idx] {audio} AES={hex}     method2（带索引）
 ///   MANAKEY1 {key} / MANAKEY2 {v} {a} / MANAKEY3 {audio} AES={hex}
 ///                                         无索引：配"最近一次文件名"
+///   MANAKEY4 file=… mode=… [aes=…] [audio=…] [videoKey=…]
+///                                         CriwareMediaPlayer 密钥结构（自带文件名）
 ///
 /// 为什么用队列而不是单槽暂存：密钥完全可能早于 MANAFILE 到达（DLL 会把启动期
 /// 一次性配置的 key 在 SetFile 之前就报上来）。旧实现的 GlobalPendingMask/GlobalPendingM2
@@ -33,6 +38,9 @@ internal sealed class KeyPairing {
 
     /// <summary>允许的 AES 密钥长度（hex 字符数）：method2 是 AES-128，固定 32 个 hex 字符。</summary>
     private const int AesHexLength = 32;
+
+    /// <summary>audioKey / 旧 videoKey 是 uint64，固定 16 个 hex 字符（左补零）。</summary>
+    private const int Key64HexLength = 16;
 
     /// <summary>待配对的密钥。</summary>
     private readonly record struct PendingKey(PairingKind Kind, string Aes, string Audio, string VideoKey);
@@ -77,6 +85,12 @@ internal sealed class KeyPairing {
         // BCKEY 自带文件名，不需要跟 MANAFILE 配对；而且实测它是**唯一**真正产出密钥的通路
         if (message.StartsWith("BCKEY", StringComparison.Ordinal)) {
             return HandleBcKey(message);
+        }
+        // MANAKEY4 也自带文件名（DLL 从 CriwareMediaPlayer 的 videoRuntimePath 读）。
+        // 必须放在 MANAKEYN1/N2/N3 之前判：虽然 "MANAKEY4" 不会命中 "MANAKEYN3"，
+        // 但保持"带索引的 N 系列先判"的既有顺序更不容易在今后的协议扩展里踩坑。
+        if (message.StartsWith("MANAKEY4", StringComparison.Ordinal)) {
+            return HandleMediaKeys(message);
         }
         if (message.StartsWith("MANAFILE ", StringComparison.Ordinal)) {
             return HandleSetFile(message);
@@ -149,6 +163,71 @@ internal sealed class KeyPairing {
             return Array.Empty<PairingEntry>();
         }
         return [new PairingEntry(file, PairingKind.Aes, keyHex, "", "")];
+    }
+
+    /// <summary>
+    /// `MANAKEY4 file=… mode=… [aes=…] [audio=…] [videoKey=…]` —— CriwareMediaPlayer 密钥结构。
+    ///
+    /// mode 1（7.1+ AES）：aes = 32 hex，audio = 16 hex（HCA keycode，只有低 56 位有效）
+    /// mode 0（旧体系）：videoKey = 16 hex（旧 finalKey），audio 与它同值
+    ///
+    /// 为什么允许"只有 audio / 只有 videoKey"：DLL 在结构刚填好、AES 数组还没就绪时也可能读到一个字段。
+    /// 这条 entry 只带它确实有的字段，JsonStore 做**字段级合并**，不会被后来的 BCKEY 整条覆盖。
+    /// </summary>
+    private PairingEntry[] HandleMediaKeys(string message) {
+        var sp = message.Split(' ');
+        string? rawFile = null;
+        var aes = "";
+        var audio = "";
+        var videoKey = "";
+        foreach (var token in sp.Skip(1)) {
+            if (token.StartsWith("file=", StringComparison.Ordinal)) {
+                rawFile = token["file=".Length..];
+            } else if (token.StartsWith("aes=", StringComparison.Ordinal)) {
+                var value = token["aes=".Length..];
+                if (!IsAesHex(value)) {
+                    _lastRejectReason = $"MANAKEY4 的 AES 不是 32 位十六进制（实际 {value.Length} 字符）";
+                    return Array.Empty<PairingEntry>();
+                }
+                aes = value.ToUpperInvariant();
+            } else if (token.StartsWith("audio=", StringComparison.Ordinal)) {
+                var value = token["audio=".Length..];
+                if (!IsKey64Hex(value)) {
+                    _lastRejectReason = $"MANAKEY4 的 audio 不是 16 位十六进制（实际 {value.Length} 字符）";
+                    return Array.Empty<PairingEntry>();
+                }
+                audio = value.ToUpperInvariant();
+            } else if (token.StartsWith("videoKey=", StringComparison.Ordinal)) {
+                var value = token["videoKey=".Length..];
+                if (!IsKey64Hex(value)) {
+                    _lastRejectReason = $"MANAKEY4 的 videoKey 不是 16 位十六进制（实际 {value.Length} 字符）";
+                    return Array.Empty<PairingEntry>();
+                }
+                videoKey = value.ToUpperInvariant();
+            }
+        }
+        if (rawFile == null) {
+            _lastRejectReason = "MANAKEY4 缺少 file=";
+            return Array.Empty<PairingEntry>();
+        }
+        // 与 BCKEY/MANAFILE 同一套规则：? 与解析失败哨兵都拒绝
+        if (rawFile.Length == 0 || rawFile == "?" || rawFile[0] == '(') {
+            _lastRejectReason = $"MANAKEY4 的密钥没有归属到具体视频（file={rawFile}）";
+            return Array.Empty<PairingEntry>();
+        }
+        if (aes.Length == 0 && audio.Length == 0 && videoKey.Length == 0) {
+            _lastRejectReason = "MANAKEY4 的三个密钥字段全为空";
+            return Array.Empty<PairingEntry>();
+        }
+        var file = StripUsmExtension(Path.GetFileName(rawFile));
+        if (file.Length == 0) {
+            _lastRejectReason = "MANAKEY4 的文件名为空";
+            return Array.Empty<PairingEntry>();
+        }
+        if (!_emitted.Add($"{file}|mk|{aes}|{audio}|{videoKey}")) {
+            return Array.Empty<PairingEntry>();
+        }
+        return [new PairingEntry(file, PairingKind.MediaKeys, aes, audio, videoKey)];
     }
 
     /// <summary>MANAFILE [idx] path —— 记录该 idx 的文件名，并把该 idx（以及无索引场景）攒下的密钥全部放出。</summary>
@@ -299,6 +378,20 @@ internal sealed class KeyPairing {
     /// <summary>method2 的 AES 必须是 32 个十六进制字符，否则不当作密钥（畸形上报不该污染密钥库）。</summary>
     private static bool IsAesHex(string value) {
         if (value.Length != AesHexLength) {
+            return false;
+        }
+        foreach (var c in value) {
+            var isHex = c is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
+            if (!isHex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>audioKey / 旧 videoKey 是 uint64，库里固定 16 个 hex 字符（左补零）。</summary>
+    private static bool IsKey64Hex(string value) {
+        if (value.Length != Key64HexLength) {
             return false;
         }
         foreach (var c in value) {

@@ -261,4 +261,100 @@ public sealed class KeyPairingTests {
         Assert.Equal("Cs_Real", entry.File);
     }
 
+    // ---------------- MANAKEY4：CriwareMediaPlayer 密钥结构（2026-11-03） ----------------
+
+    /// <summary>7.1+ 的 AES 形态：aes + audio 一起到，且自带文件名。</summary>
+    [Fact]
+    public void MediaKeys_NewFormat_EmitsAesAndAudio() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle(
+            "MANAKEY4 file=Cs_ZD_AQ70201201_SLT.usm mode=1 aes=" + Aes1 + " audio=0004BA5069B44BD4"));
+
+        Assert.Equal("Cs_ZD_AQ70201201_SLT", entry.File);   // .usm 必须被剥掉
+        Assert.Equal(PairingKind.MediaKeys, entry.Kind);
+        Assert.Equal(Aes1, entry.Aes);
+        Assert.Equal("0004BA5069B44BD4", entry.Audio);
+        Assert.Equal("", entry.VideoKey);
+    }
+
+    /// <summary>
+    /// 旧 56 位形态：**只报 videoKey**。旧体系里 audioKey 与 videoKey 是同一个值
+    /// （HCA 只用低 56 位），库里只存一个就够，格式与 hk4e_keys.json 的旧条目一致。
+    /// </summary>
+    [Fact]
+    public void MediaKeys_LegacyMode_EmitsVideoKeyOnly() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle(
+            "MANAKEY4 file=Video_Reunion_67.usm mode=0 videoKey=0004CDB4745CD9EF"));
+
+        Assert.Equal(PairingKind.MediaKeys, entry.Kind);
+        Assert.Equal("0004CDB4745CD9EF", entry.VideoKey);
+        Assert.Equal("", entry.Audio);
+        Assert.Equal("", entry.Aes);
+    }
+
+    /// <summary>协议兼容：旧报文即使仍带 audio（与 videoKey 同值）也能解析，最终由 JsonStore 归一成裸字符串。</summary>
+    [Fact]
+    public void MediaKeys_LegacyMode_WithAudio_IsStillAccepted() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle(
+            "MANAKEY4 file=Video_Reunion_67.usm mode=0 videoKey=0004CDB4745CD9EF audio=0004CDB4745CD9EF"));
+
+        Assert.Equal("0004CDB4745CD9EF", entry.VideoKey);
+        Assert.Equal("0004CDB4745CD9EF", entry.Audio);
+    }
+
+    /// <summary>只读到 audio（AES 数组还没填好）也要接受：JsonStore 会做字段级合并。</summary>
+    [Fact]
+    public void MediaKeys_OnlyAudio_IsAccepted() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle("MANAKEY4 file=Cs_Video.usm mode=1 audio=0004BA5069B44BD4"));
+
+        Assert.Equal("0004BA5069B44BD4", entry.Audio);
+        Assert.Equal("", entry.Aes);
+    }
+
+    [Fact]
+    public void MediaKeys_WithoutFileAttribution_IsRejected() {
+        var p = new KeyPairing();
+
+        Assert.Empty(p.Handle("MANAKEY4 file=? mode=1 aes=" + Aes1));
+        Assert.Empty(p.Handle("MANAKEY4 mode=1 aes=" + Aes1));
+        Assert.NotNull(p.LastRejectReason);
+    }
+
+    [Fact]
+    public void MediaKeys_BadKeyLength_IsRejected() {
+        var p = new KeyPairing();
+
+        Assert.Empty(p.Handle("MANAKEY4 file=Cs_Video.usm mode=1 aes=ABC audio=0004BA5069B44BD4"));
+        Assert.Empty(p.Handle("MANAKEY4 file=Cs_Video.usm mode=1 audio=123"));
+        Assert.Empty(p.Handle("MANAKEY4 file=Cs_Video.usm mode=0 videoKey=0011"));
+    }
+
+    /// <summary>同一视频重复播放会重复上报，密钥库里只能有一条。</summary>
+    [Fact]
+    public void MediaKeys_Repeated_IsEmittedOnce() {
+        var p = new KeyPairing();
+        var line = "MANAKEY4 file=Cs_Video.usm mode=1 aes=" + Aes1 + " audio=0004BA5069B44BD4";
+
+        Assert.Single(p.Handle(line));
+        Assert.Empty(p.Handle(line));
+    }
+
+    [Fact]
+    public void MediaKeys_LowerCaseHex_IsNormalizedToUpperCase() {
+        var p = new KeyPairing();
+
+        var entry = Assert.Single(p.Handle(
+            "MANAKEY4 file=Cs_Video.usm mode=1 aes=" + Aes1.ToLowerInvariant() + " audio=0004ba5069b44bd4"));
+
+        Assert.Equal(Aes1, entry.Aes);
+        Assert.Equal("0004BA5069B44BD4", entry.Audio);
+    }
+
 }

@@ -1,9 +1,14 @@
 # GenshinManaKey — 原神过场动画（USM / CRI Mana）解密密钥截获工具
 
-Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播放时截获**最终解密密钥**，
-并按"正在播放的文件"自动配对，直接产出可并入 key 库的 JSON。
+Hook 游戏内 CRI Mana 播放器真正走的设 key 路径，在过场动画播放时截获**视频 AES key、
+音频 HCA key（audioKey）以及 ≤7.0 旧体系的 videoKey**，并按"正在播放的文件"自动配对，
+直接产出可并入 key 库的 JSON。
 
-> 版本适配：**国服 7.2 已迁（`0x0717D410`），国际服仍是 7.1 的值（未复核）**。
+> 2026-11-03：补回**音频 key 与旧 videoKey**。v20 曾认为「4 个设密钥函数 0 次调用」，
+> 实际是 xref 扫错了地址（`0x07054B80` 是 `Player.UpdateWithUserTime`，正确的是 `0x070548F0`）。
+> 详见下面「为什么音频 key 以前抓不到」。
+>
+> 版本适配：**国服 7.2 已迁（`0x0717D410` / MP `0x13140020`），国际服仍是 7.1 的值（未复核）**。
 > 每次游戏更新只需双击 `update_rva.cmd`，详见「版本更新后怎么把这些 RVA 重新找回来」。
 
 结构仿照崩铁的 `hsr-mana-key`（本身就是仿 `YaeAchievement` 的注入框架）。
@@ -36,19 +41,27 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 
 | 钩子 | 方法 | 国服 YuanShen.exe（**7.2**） | 国际服 GenshinImpact.exe（**7.1，未复核**） | 默认挂 |
 |---|---|---|---|---|
-| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x0717D410`（7.1 是 `0x070538C0`） | `0x070507A0` | ★ **是（唯一的 il2cpp 钩子）**；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
-| — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **key 本体**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
+| NF | `NativeMethods_SetFile(int, IntPtr binder, string path)` → **文件名** | `0x0717D410`（7.1 是 `0x070538C0`） | `0x070507A0` | ★ 是；`GMK_STRICT=1` 且版本指纹不匹配时不挂 |
+| MP | `MoleMole.CriwareMediaPlayer.<混淆名>` → **音频 key + 旧 videoKey** | `0x13140020`（7.1 是 `0x12DD42B0`） | `0x12DA2A40`（7.1） | ★ 是（第 2 个 il2cpp 补丁；RVA=0 时跳过） |
+| — | `bcrypt.dll!BCryptGenerateSymmetricKey` → **视频 AES key**（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
 | — | `bcrypt.dll!BCryptEncrypt` → 密钥流验证（系统库，无 RVA） | 导出地址，运行时解析 | 同左 | ★ 是 |
+
+> **2026-11-03 起 il2cpp 补丁面积 = 2（NF + MP），bcrypt 导出钩子 = 2。** 只多挂了 1 处：
+> MP 那一个函数同时处理两套体系（`mode 0` 旧 56 位 / `mode 1` AES），所以不需要把
+> S2/S3/N2/N3 四个都挂回来。
 
 > **7.2 的迁移（2026-11-02）**：`update_rva.py` 掩码指纹唯一命中 `0x070538C0 → 0x0717D410`，
 > 落盘前三项静态复核全过 —— ① 落在 `.pdata` 函数起点；② 函数体 231 字节 / 57 条指令，
 > 与 7.1 **逐字节一致**（只有 imm/disp 共 112 字节被通配，固定字节 0 处不同）；
 > ③ `il2cpp` 段内唯一 `E8` 直接调用点在函数起点 −0x25，与 7.1 同一相对位置。
+>
+> **MP 的 7.2 迁移（2026-11-03）**：同样用掩码指纹，`0x12DD42B0 → 0x13140020` 唯一命中
+> （函数体 1148 字节；7.2 元数据 `methods.csv` 的 `MoleMole.CriwareMediaPlayer.AABGGCLCMKA`
+> 也指向同一地址，交叉一致）。
 
-> **v20（2026-10-24）起诊断钩子全部删除。** 原有的 S2/S3/N2/N3 四个 MANAKEY 钩子与
-> 9 个 GMK_FULL 侦察钩子实测（2026-10-16 多轮日志）要么 0 次调用、要么只服务逆向调查，
-> 却每个版本都要迁移 RVA —— 已从源码移除（历史代码与 RVA 见 git，v19 及之前）。
-> il2cpp 补丁面积恒为 1，`GMK_FULL` 开关随之取消。
+> **v20（2026-10-24）删除诊断钩子**：S2/S3/N2/N3 与 9 个 GMK_FULL 侦察钩子中，
+> S2/N2/N3 确实实测 0 次调用；**S3 的「0 次」是扫错地址得出的**（见「为什么音频 key 以前抓不到」）。
+> 2026-11-03 只补回 1 个 MP，il2cpp 补丁面积 = 2；`GMK_FULL` 开关仍不恢复。
 >
 > ⚠️ 与崩铁的关键差异：原神的 IL2CPP 代码**在 exe 里**（`il2cpp` 段），
 > **没有 GameAssembly.dll**；而且 exe **不导出任何 il2cpp_\* API**（只有 4 个导出）。
@@ -63,7 +76,8 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 ## 实际起作用的钩子（2026-10-16 默认配置实测）
 
 > **本节也是历史记录**：命中数是那一轮 DLL 构建（v19 口径，默认 `hook × 5`）跑出来的，
-> v20 已删除全部诊断钩子，**当前默认补丁面积只有 1 + 2**（见「钩子开关」）。
+> v20 已删除全部诊断钩子；2026-11-03 又补回 MP 一个钩子，
+> **当前默认补丁面积 = 2 + 2**（见「钩子开关」）。
 > 保留下面的表是为了留"为什么只剩 NF + bcrypt"的证据链，不代表现在的挂钩清单。
 
 一整轮里每个钩子的**命中次数**（`run/dumper.log`，5 个视频）：
@@ -74,14 +88,65 @@ Hook 游戏内 CRI Mana 播放器的**设 key API**，在过场动画真正播�
 | `NativeMethods_SetFile` @ `0x070538C0` | MANAFILE 5 条 | ★ **唯一的文件名来源**（key → 视频 归属） |
 | `bcrypt.dll!BCryptEncrypt` | BCENC 15 条 | 只做密钥流验证（IN=计数块/OUT=密钥流），**不产出 key** |
 | S2 / N2 / N3 | **0** | 方法存在、RVA 正确，但游戏不走这条托管 API |
-| S3 | **0** | ⚠️ 旧值 `0x07054B80` 其实是 `Player.UpdateWithUserTime`（挂错，已修正为 `0x070548F0`） |
+| S3 | **0（历史误判）** | ⚠️ 旧值 `0x07054B80` 其实是 `Player.UpdateWithUserTime`；正确的是 `0x070548F0`（7.2 是 `0x0717E440`），7.1/7.2 里都有 **2 处**调用（来自 MP），见下节 |
 | 托管 `SetFile` / KeyFeed / DECKEY / CRICIPHER / CRIKEY | **0**（默认不挂） | 历史 `GMK_FULL=1` 轮次里 KeyFeed 命中 16 次，抓到的 CRIKEY 是 `D0070002…`（不是密钥） |
 
-`run/mana_keys.log` 里也只有两种行：`BCKEY` + `MANAFILE` —— 这是"只有这两个钩子在生产"的直接证据。
+`run/mana_keys.log` 里也只有两种行：`BCKEY` + `MANAFILE` —— 这是当年"只有这两个钩子在生产"的直接证据。
 
-**所以默认运行只需要**：`bcrypt.dll` 的 2 个导出钩子（key + 验证）+ 1 个 il2cpp 钩子（文件名）。
-v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`，默认 il2cpp 补丁面积 **5 → 1**；
-**v20 起诊断钩子彻底删除**（`AttachManaKeyHooks`/`AttachDiagnostics` 等已从源码移除），补丁面积恒为 1。
+**当前默认运行**：`bcrypt.dll` 的 2 个导出钩子（视频 AES + 验证）+ **2 个 il2cpp 钩子**
+（NF 文件名 + MP 音频/旧 videoKey）。历史变化：v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`，
+默认 il2cpp 补丁面积 **5 → 1**；v20 删除全部诊断钩子（补丁面积恒为 1）；
+**2026-11-03 补回 MP，补丁面积 = 2 + 2**。
+
+## 为什么音频 key 以前抓不到（2026-11-03 修正）
+
+v20 的结论是「4 个设密钥函数整场 0 次调用」，并据此删掉了音频通路。这个结论对 S2/N2/N3 成立，
+**对 S3（`SetVideoAesKeyAudioDecryptionKey`）不成立** —— 当年挂的是：
+
+```
+hook SetVideoAesKeyAudioDecryptionKey @ 0x7FF66E944B80   → RVA 0x07054B80
+```
+
+而元数据里：
+
+```
+7.1: SetVideoAesKeyAudioDecryptionKey = 0x070548F0   ← 真正设 AES + audioKey 的函数
+7.1: UpdateWithUserTime               = 0x07054B80   ← 当年挂错的那个
+7.2: SetVideoAesKeyAudioDecryptionKey = 0x0717E440
+```
+
+对 7.1 / 7.2 exe 重新扫 `.text` / `il2cpp` / `.upx0` 的 `E8 rel32`，正确地址各有 **2 处**调用：
+
+```
+7.1: @0x70548f0  ← 0x12dd434b, 0x12dd44d3   调用者 MoleMole.CriwareMediaPlayer.GAKIOOPLFAA
+7.2: @0x717e440  ← 0x131400bb, 0x13140243   调用者 MoleMole.CriwareMediaPlayer.AABGGCLCMKA
+```
+
+所以音频 key 一直都在下发，只是钩错了函数。
+
+**MP 这个函数同时处理两套体系**（7.1/7.2 反汇编一致）：
+
+| `[this+0xB8]` | 含义 | `[this+0xC0]` | `[this+0xC8]` | `[this+0xD0]` |
+|---:|---|---|---|---|
+| `0` | 旧 56 位体系 | `videoKey`（旧 finalKey） | — | audioKey = videoKey（**只上报 videoKey**；旧库只存一个） |
+| `1` | 7.1+ AES 体系 | `audioKey` | AES `byte[16]` | bool = 是否带 audioKey |
+
+文件名在 `[this+0x88]`（`get_videoRuntimePath` 的返回值），所以 MANAKEY4 自带 `file=`，
+不需要跟 MANAFILE 配对。`MediaPlayerSetup` 把配置结构逐 16 字节拷到
+`+0x88/+0x98/+0xA8/+0xB8/+0xC8/+0xD8`，7.1 与 7.2 **逐字节一致**。
+
+> ⚠️ 不要改挂 `SetVideoAudioDecryptionKeys` / `CRIWARE948D1068`：旧分支的 P/Invoke stub
+> 被内联进了调用者（`0x533FC0` 解析 + `call rax`），那两个方法体在 7.1/7.2 都是 0 次执行。
+> 改挂 CRI DLL（`cri_ware_unity.dll`）的导出更不行 —— v4 实测会触发反作弊、视频放不出来。
+
+**验证口径**（播放对应剧情后直接比对 `hk4e_keys.json`）：
+
+| 文件 | 期望 aes | 期望 audio |
+|---|---|---|
+| `Cs_ZD_AQ70201201_SLT` | `F5AC17FF…` | `0004BA5069B44BD4` |
+| `Cs_ZD_AQ70171401_UR_Girl` | `F9E9E1C5…` | `0012C36BB5A16651` |
+| `Video_Reunion_71` | `52110EFF…` | `0006A4BB7F1FB355` |
+| `Cs_ZD_AQ70091801_HY`（旧体系） | — | `videoKey = 00112B7D77DE1D7C` |
 
 **这些 RVA 是怎么核对的**：`cn/out` 的 dump.cs 只有方法索引、没有 RVA，所以拿
 `genshin-metadata/global/out/methods_r.csv`（国际服 7.1 全量 idx→RVA）当参照 —— 两服同一份源码、
@@ -109,12 +174,14 @@ v19 起 4 个 MANAKEY 移入 `GMK_FULL=1`，默认 il2cpp 补丁面积 **5 → 1
 1. 它自己找新 exe（`run\game_path.txt` → 游戏目录；拖拽/参数优先）；
 2. 拿 `rva_cache\<exe名>` 里缓存的**上一版 exe** 当参照（脚本每次成功后自动缓存，所以这个目录别删）；
 3. 从 `inject\src\Application.cs` 读出当前常量当"旧 RVA"，用掩码指纹迁到新 exe
-   （v20 起清单只有 NF 一项）；
+   （当前清单 2 项：`NativeSetFile` + `MediaPlayerKeys`）；
 4. 打印 旧→新 对照表：**只采信唯一命中**；不唯一的会把候选列出来让你选（绝不自动猜）；
 5. **没迁上的常量会不会写成 `0`，取决于它是不是关键项** —— 真实语义（以前文档写含糊了）：
    非 NF 的常量迁不上就写 `0`（C# 侧约定"0 = 该服务器未定位此钩子 → 跳过并打日志"，
    比留着旧 RVA 安全）；**`NativeSetFile`（NF）例外：不写 0、保留旧 RVA**，脚本以非 0 退出 ——
-   关掉唯一的文件名来源比"少挂"更糟。⚠ 于是存在这种组合："**迁移失败还直接 build**" =
+   关掉唯一的文件名来源比"少挂"更糟。`MediaPlayerKeys`（MP）**不是关键项**：迁不上写 0，
+   视频 AES 仍由 bcrypt 钩子产出，只是没有 audio / 旧 videoKey。
+   ⚠ 于是存在这种组合："**迁移失败还直接 build**" =
    出厂的二进制是"**新 exe + 旧 RVA**"；旧 RVA 很容易仍通过"可执行节+可读+序言"三项校验，
    于是把补丁打到别的函数上、错得不声不响。这正是下一节「版本指纹」存在的理由：下一次启动就把它喊出来。
    旧值可在 `.bak-<时间戳>` 备份里找回，或 `git diff inject/src/Application.cs` 取回；
@@ -139,11 +206,12 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 ```
 
 > 退出码：`0` 成功（含 `--dry-run` 成功）；`2` 参数/环境错误；
-> `1` = **NF 没迁上**（v20 起 NF 是唯一常量，此即"什么都没写"、NF 保留旧值）；
+> `1` = **NF 没迁上**（NF 是唯一关键项，此即"什么都没写"、NF 保留旧值；MP 会按规则写 0）；
 > **`3` = 源码已写回但 `--build` 编译失败** —— 唯一一个"源码改了、产物没换"的码。
 
 > 第一次用（还没有 `rva_cache\`）时，把当前版本的 exe 复制成 `rva_cache\YuanShen.exe`，
-> 或者 `update_rva.cmd --old <旧exe>`。**这次 7.1 的 exe 已经缓存好了**，7.2 一更新直接双击即可。
+> 或者 `update_rva.cmd --old <旧exe>`。**当前缓存的 `rva_cache\YuanShen.exe` 是 7.2 国服**，
+> 下次更新直接双击即可。
 
 ### 版本指纹（自证）
 
@@ -221,9 +289,9 @@ update_rva.cmd --old-rva NativeSetFile=0x070538C0   # 源码里该项已成 0 �
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `GMK_STRICT=1` | 关 | **只有**"指纹已登记但与当前 exe 不符（`Mismatch`）"时**跳过 NF 挂钩**（其余钩子不拦）；默认只警告、照挂。"未登记"（登记值 `0`，例如国际服）**不拦** —— 否则这个开关会让人一个钩子都挂不上，比不检查更糟 |
+| `GMK_STRICT=1` | 关 | **只有**"指纹已登记但与当前 exe 不符（`Mismatch`）"时**跳过 NF/MP 两个 il2cpp 钩子**（bcrypt 的 2 个不拦）；默认只警告、照挂。"未登记"（登记值 `0`，例如国际服）**不拦** —— 否则这个开关会让人一个钩子都挂不上，比不检查更糟 |
 
-严格模式的日志形态：`[skip] NativeMethods_SetFile: GMK_STRICT=1 且版本指纹不匹配 → 不挂 NF（避免把补丁打到别的函数上）。跑 tools\update_rva.cmd 迁移后重试`。
+严格模式的日志形态：`[skip] NativeMethods_SetFile / CriwareMediaPlayer: GMK_STRICT=1 且版本指纹不匹配 → 不挂这两个 il2cpp 钩子（避免把补丁打到别的函数上）。跑 tools\update_rva.cmd 迁移后重试`。
 
 **闭环**：`tools\update_rva.py` 迁移成功时把新 exe 的指纹一起写回 `RvaSet.Fingerprint`，所以正常流程是
 "双击 `update_rva.cmd` → 指纹自动更新 → 下次启动显示「匹配」"。指纹**不是**安全机制，
@@ -320,14 +388,14 @@ RVA `0x19F73B00` / `0xD796B8` 字节 / 1,177,402 条，全部合法且单调有�
 | `GMK_BC=0` | 开 | 关掉 `bcrypt.dll`（系统库）钩子。默认运行**唯一真正产出密钥**的就是这条路径 —— 除非事实证明系统库补丁也影响播放，否则不要关 |
 | `GMK_FS=1` | 关 | 启动 CRI FS 侦察线程。实测该线程会让视频无法播放，仅用于调查（无 RVA 依赖，不参与版本更新） |
 | `GMK_REUSE=1` | 关 | 打开「跨视频复用密钥」的补报。实测每个视频都会自己重建密钥对象并报 `BCKEY`（自带文件名），补报只会在换新钥匙时抢跑误报，仅当某个视频一条 `BCKEY` 都没有时才需要它（见下面「同一把密钥可能覆盖多个视频」） |
-| `GMK_STRICT=1` | 关 | 严格版本模式：**只在"版本指纹已登记但与当前 exe 不符"时跳过 NF 挂钩**（默认只警告、照挂；"未登记"不拦）。取舍见「版本指纹（自证）」一节 |
+| `GMK_STRICT=1` | 关 | 严格版本模式：**只在"版本指纹已登记但与当前 exe 不符"时跳过 NF/MP 两个 il2cpp 钩子**（默认只警告、照挂；"未登记"不拦）。取舍见「版本指纹（自证）」一节 |
 
 （v20 起没有诊断钩子了，`GMK_FULL` 开关已随诊断代码一起删除。）
 
-默认运行 = **1 个 il2cpp 补丁（NF，文件名来源）+ 2 个 bcrypt 导出钩子（取 key + 验签）**，
-即**补丁面积 1 + 2**；诊断钩子（`SUB*` / `MANAKEY*` 等）已不存在，所以**默认**下这个数字是常数。
-只有两个开关会改它：`GMK_BC=0` 关掉 bcrypt 的那 2 个（只剩 NF = 1 + 0）；
-`GMK_STRICT=1` 在"指纹不匹配"时关掉 NF（只剩 bcrypt 的 2 个）。
+默认运行 = **2 个 il2cpp 补丁（NF 文件名 + MP 音频/旧 videoKey）+ 2 个 bcrypt 导出钩子（视频 AES + 验签）**，
+即**补丁面积 2 + 2**；诊断钩子（`SUB*` / S2/N2/N3 等）已不存在。
+只有两个开关会改它：`GMK_BC=0` 关掉 bcrypt 的那 2 个（只剩 2 + 0）；
+`GMK_STRICT=1` 在"指纹不匹配"时 NF 和 MP 都不挂（只剩 bcrypt 的 2 个）。
 
 ## 使用（需要管理员，游戏必须已关闭）
 
@@ -349,10 +417,21 @@ ManaKeyDumper.exe <游戏目录 或 exe 全路径>   # 显式指定（优先级�
 
 进游戏播放加密过场动画（例：内容组 3003 的 300317-300321）。实时输出两份文件：
 
-- `run\mana_keys.log` — 原始事件（`MANAFILE*` / `BCKEY` 行，去重后落盘）
+- `run\mana_keys.log` — 原始事件（`MANAFILE*` / `BCKEY` / `MANAKEY4` 行，去重后落盘）
 - `run\paired_keys.json` — **按文件名配对**的密钥（累积写入，缩进美化，可直接并入 key 库）：
-  `{ "文件名": { "aes": "<32hex>" } }`
-  （v20 起只存 BCKEY 的视频 AES —— 文件名 + aes；旧掩码 / method2 体系随钩子一起退役）
+  ```json
+  {
+    "Cs_ZD_AQ70201201_SLT": {
+      "aes": "F5AC17FFE4B4B430553AE073EB8A8A1D",
+      "audio": "0004BA5069B44BD4"
+    },
+    "Cs_ZD_AQ70091801_HY": "00112B7D77DE1D7C"
+  }
+  ```
+  - 新体系：`aes`（32 hex）+ `audio`（16 hex）；
+  - 旧体系：只写一个裸 16 hex 字符串（videoKey；audioKey 与它同值，HCA 只用低 56 位），
+    与 `hk4e_keys.json` 的 ≤7.0 条目完全同格式；
+  - **按字段合并**：BCKEY 只写 `aes`，MANAKEY4 只写它有的字段，两者谁先到都不会互相覆盖。
 
 四个产物（`mana_keys.log` / `paired_keys.json` / `dumper.log` / `dump\`）全部锚定在 **exe 所在目录**，
 不管从哪个工作目录启动都一样。

@@ -20,8 +20,9 @@
      "源码里这些 RVA 属于这一版 exe"的断言，所以只在全部常量都迁移成功时才写 —— 有任何一个
      没迁上还写它，下一版就会拿到"版本对得上、地址却过期"的假绿灯（C# 侧挡不住）。
 
-v20 起源码里只剩 1 个 il2cpp RVA（NativeSetFile，文件名来源）——诊断钩子已随
-2026-10 的清理一起删除，本脚本的迁移清单也缩到 1 项。
+v20 起源码里只剩 1 个 il2cpp RVA（NativeSetFile，文件名来源）；
+2026-11-03 补回第 2 个 `MediaPlayerKeys`（CriwareMediaPlayer 里同时下发音频 key 与旧 videoKey 的函数）。
+诊断钩子仍全部删除。
 
 提示：NF 的真名是 `CriWare.CriMana.Player.NativeMethods_SetFile`（CRI 包装类不受
 混淆影响）。genshin-metadata 项目的 `cn/out/methods.csv` 有全量 名字→RVA 表，
@@ -95,9 +96,11 @@ FINGERPRINT_MAX_BYTES = 0x10000        # 上限：防畸形 SizeOfHeaders 把整
 FINGERPRINT_MIN_BYTES = 0x200          # 下限：比一个文件对齐还小就不可能装下 PE 头
 FINGERPRINT_FALLBACK_BYTES = 0x400     # 头部自解析不可信时的兜底长度（= 典型 SizeOfHeaders）
 
-# v20 起源码里只剩这一个 il2cpp RVA（诊断钩子已删除）。保留列表形式：
+# 2026-11-03 起有两个 il2cpp RVA：
+#   NativeSetFile   —— 文件名来源（关键项：迁不上不写 0、保留旧值并以非 0 退出）
+#   MediaPlayerKeys —— 音频 key + 旧 videoKey（非关键：迁不上写 0，C# 侧跳过并打日志）
 # 以后若新增钩子，往这里加名字（必须与 Application.cs RvaSet 的字段名一致）即可。
-FUNCTION_ORDER = ['NativeSetFile']
+FUNCTION_ORDER = ['NativeSetFile', 'MediaPlayerKeys']
 
 BLOCK_RE = re.compile(
     r'(?s)(private static readonly RvaSet (?P<which>Cn|Gl) = new\(\) \{)(?P<body>.*?)(\n    \};)')

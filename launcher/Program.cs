@@ -33,10 +33,11 @@ internal static class Program {
         // 标题不写死游戏版本：RVA 由注入 DLL 的 RvaSet.Fingerprint + update_rva.cmd 维护，
         // 写死版本号只会让日志在下次更新后先自相矛盾。具体版本看下一行的"版本指纹"日志。
         Log.Write("GenshinManaKey - 原神过场动画密钥截获 (CRI Mana / AES_HCA)");
-        Log.Write("  hook: bcrypt.dll!BCryptGenerateSymmetricKey（唯一的 key 来源）");
+        Log.Write("  hook: bcrypt.dll!BCryptGenerateSymmetricKey（视频 AES-128）");
         Log.Write("        bcrypt.dll!BCryptEncrypt（密钥流验证）");
-        Log.Write("        NativeMethods_SetFile（唯一的文件名来源；默认唯一挂的 il2cpp 钩子）");
-        Log.Write("  输出: mana_keys.log(原始) + paired_keys.json(按文件名配对, 可直接并入 key 库)");
+        Log.Write("        NativeMethods_SetFile（文件名来源）");
+        Log.Write("        CriwareMediaPlayer 设钥函数（音频 key + 旧 videoKey）");
+        Log.Write("  输出: mana_keys.log(原始) + paired_keys.json(aes/audio/videoKey, 可直接并入 key 库)");
         Log.Write("========================================");
         try {
             return Run(args);
@@ -335,14 +336,29 @@ internal static class Program {
     private static void WritePairingEntry(PairingEntry entry) {
         try {
             if (entry.Kind == PairingKind.Aes) {
-                // BCKEY 通路（bcrypt）：这是 7.x 唯一会真正触发的密钥来源
+                // BCKEY 通路（bcrypt）：视频 AES-128
                 JsonStore.UpsertAes(Paths.PairedKeys, entry.File, entry.Aes);
                 Log.Pair($"★★ 已配对(视频 AES) {entry.File} → paired_keys.json (aes={entry.Aes})");
                 Interlocked.Increment(ref _pairedCount);
+            } else if (entry.Kind == PairingKind.MediaKeys) {
+                // MANAKEY4 通路（CriwareMediaPlayer）：音频 key 与/或旧 videoKey，可能还带 AES
+                JsonStore.UpsertKeys(Paths.PairedKeys, entry.File, entry.Aes, entry.Audio, entry.VideoKey);
+                var detail = new StringBuilder(64);
+                if (entry.Aes.Length > 0) {
+                    detail.Append("aes=").Append(entry.Aes);
+                }
+                if (entry.Audio.Length > 0) {
+                    detail.Append(detail.Length > 0 ? " " : "").Append("audio=").Append(entry.Audio);
+                }
+                if (entry.VideoKey.Length > 0) {
+                    detail.Append(detail.Length > 0 ? " " : "").Append("videoKey=").Append(entry.VideoKey);
+                }
+                var label = entry.VideoKey.Length > 0 ? "旧体系" : "音频";
+                Log.Pair($"★★ 已配对({label}) {entry.File} → paired_keys.json ({detail})");
+                Interlocked.Increment(ref _pairedCount);
             } else {
-                // 旧体系（掩码 / method2）的钩子已在 v20 随诊断一起删除，正常不会再产生这类上报；
-                // KeyPairing 保留解析只是为了协议兼容，这里明确不入库（paired_keys.json 只存 文件名+aes）。
-                Log.Warn($"忽略旧体系密钥上报（{entry.Kind}）{entry.File}：v20 起只入库 BCKEY 的视频 AES");
+                // MANAKEY1/2/3 的旧协议解析还保留着（协议兼容），但 v20 之后没有钩子会产出它们。
+                Log.Warn($"忽略旧协议密钥上报（{entry.Kind}）{entry.File}：当前只认 BCKEY 与 MANAKEY4");
             }
             // 配对行走 Log.Pair：**只有它们会上遮罩**，其余日志（含诊断）只进 dumper.log。
             // 为什么只留这一行：遮罩贴在游戏画面上，管道诊断几十行没人会看，

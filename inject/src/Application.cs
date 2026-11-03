@@ -5,27 +5,29 @@ using GenshinSniffer.Utilities;
 namespace GenshinSniffer;
 
 /// <summary>
-/// GenshinManaKey 注入 DLL —— 截获原神（hk4e）7.1 过场动画的 CRI Mana 解密密钥。
+/// GenshinManaKey 注入 DLL —— 截获原神（hk4e）过场动画的 CRI Mana 解密密钥。
 ///
-/// === 本版（v20）相对上一版的改动要点 ===
-///   · **删除全部诊断钩子**（原 GMK_FULL 下的 4 个 MANAKEY + 9 个侦察钩子）：
-///     2026-10-16 多轮实测，7.x 的密钥只走 bcrypt 通路（BCKEY），托管 MANAKEY 钩子
-///     整场游戏 0 次调用；对象扫描/KLASS dump/CRICIPHER/DECKEY 只服务于逆向调查。
-///     删掉后 il2cpp 补丁面积恒为 1 处，版本更新也只需迁移 1 个 RVA（见 update_rva.py）。
-///     历史代码见 git（v19 及之前）。
+/// === 本版相对 v20 的改动要点 ===
+///   · **补回音频 key 与旧 videoKey**：v20 曾认为「4 个设密钥函数 0 次调用」，
+///     实际是 xref 扫错了地址（0x07054B80 = UpdateWithUserTime，正确是 0x070548F0）。
+///     现在只补 1 处 il2cpp 补丁（CriwareMediaPlayer 的设钥函数），同时覆盖
+///     mode 0 旧体系和 mode 1 AES 体系；S2/N2/N3 仍不挂（确实 0 次调用）。
 ///   · 保留的可选项：GMK_BC=0 关 bcrypt 钩子；GMK_FS=1 启用 CRI FS 侦察线程
 ///     （无 RVA 依赖，不参与版本更新）；GMK_REUSE=1 允许"同钥换视频"补报。
 ///
 /// 密钥链路（全部实测依据）：
-///   文件名  NativeMethods_SetFile（il2cpp，唯一稳定触发的钩子）→ s_curFile
-///   密钥    BCryptGenerateSymmetricKey（bcrypt.dll，系统库）的 pbSecret = 16 字节 AES key
-///   归属    BCKEY 行自带 file=，launcher 的 KeyPairing 直接落 paired_keys.json
+///   文件名  NativeMethods_SetFile（il2cpp）→ s_curFile
+///   视频 AES  BCryptGenerateSymmetricKey（bcrypt.dll，系统库）的 pbSecret = 16 字节 AES key
+///   音频/旧钥 CriwareMediaPlayer 的设钥函数（il2cpp）→ MANAKEY4（audio / 旧 videoKey）
+///   归属    BCKEY 自带 file=；MANAKEY4 自带 file=（都能直接落 paired_keys.json）
 ///
 /// 目标客户端：国服 YuanShen.exe / 国际服 GenshinImpact.exe。
 ///
 /// 上报协议（前缀与字段位置不得改动，启动器按它解析；0xFC/0xFD/0xFE 语义由 Goshujin 负责）：
-///   MANAFILE  [i] &lt;路径&gt;      NativeMethods_SetFile（native 层，带 playerIndex）★ 唯一的 il2cpp 钩子
+///   MANAFILE  [i] &lt;路径&gt;      NativeMethods_SetFile（native 层，带 playerIndex）
 ///   BCKEY / BCENC             bcrypt.dll 钩子产出（密钥本体 / 密钥流验证）
+///   MANAKEY4  file=… mode=… [aes=…] [audio=…] [videoKey=…]
+///                             CriwareMediaPlayer 密钥结构（mode 0 旧体系 / mode 1 AES）
 ///   FSWATCH / FSREG / FSCALL  仅 GMK_FS=1（CRI FS 就地解密回调捕获）
 ///   EXC / EXCSUM              异常诊断行
 ///
@@ -63,9 +65,10 @@ internal static unsafe class Application {
     /// 绝不编造 RVA：地址蒙错时若恰好通过序言校验，被改掉的就是别的函数的代码，
     /// 游戏行为会变得无法解释（比重启一次工具贵得多）。
     ///
-    /// v20 起只保留 NF（NativeMethods_SetFile）：它是唯一需要的 il2cpp 钩子（文件名来源），
-    /// 也让 update_rva.py 的迁移清单缩到 1 项。真名 CriWare.CriMana.Player.NativeMethods_SetFile，
-    /// 可用 genshin-metadata 的 methods.csv 按名直读（全名稳定，CRI 包装类不受混淆影响）。
+    /// v20 只保留 NF（NativeMethods_SetFile）：它是文件名来源，真名稳定，
+    /// 可用 genshin-metadata 的 methods.csv 按名直读。
+    /// 2026-11-03 补回 MP（CriwareMediaPlayer 的设钥函数）：它同时覆盖音频 key 与旧 videoKey。
+    /// 它是混淆名，不能按名直读，只能靠 update_rva.py 的掩码指纹迁移。
     /// </summary>
     private sealed class RvaSet {
         public string Name = "";
@@ -77,7 +80,16 @@ internal static unsafe class Application {
         /// </summary>
         public uint Fingerprint;
 
-        public uint NativeSetFile;              // NF ★文件名来源，唯一的 il2cpp 钩子
+        public uint NativeSetFile;              // NF ★文件名来源
+
+        /// <summary>
+        /// CriwareMediaPlayer 里那个"设密钥"函数（国服 7.2 混淆名 AABGGCLCMKA）。
+        /// 同一处同时处理两套体系：
+        ///   mode 0 → 旧 56 位 videoKey + audio（同值，只上报 videoKey）
+        ///   mode 1 → AES byte[16] + audioKey(ulong)
+        /// **0 = 未定位**：此时音频 key 与旧 videoKey 都抓不到，但不影响 BCKEY 的视频 AES。
+        /// </summary>
+        public uint MediaPlayerKeys;
     }
 
     /// <summary>
@@ -101,6 +113,12 @@ internal static unsafe class Application {
         Name = "国服 YuanShen.exe 7.2",
         Fingerprint = 0x88FB991A,
         NativeSetFile = 0x0717D410,
+        // 真名 MoleMole.CriwareMediaPlayer.AABGGCLCMKA（7.2 混淆名；7.1 叫 GAKIOOPLFAA）。
+        // 来源：cn/out/methods.csv idx=224919 → RVA 320077856；
+        // 反汇编确认：内部 2 处调用 Player.SetVideoAesKeyAudioDecryptionKey @ 0x0717E440，
+        // 且 this+0xB8 mode / +0xC0 key64 / +0xC8 aes[] / +0xD0 hasAudio 的用法与 7.1 一致。
+        // 7.1→7.2 掩码指纹迁移实测唯一命中：0x12DD42B0 → 0x13140020。
+        MediaPlayerKeys = 0x13140020,
     };
 
     /// <summary>
@@ -111,9 +129,12 @@ internal static unsafe class Application {
     /// 在国际服客户端上跑一次 update_rva.cmd 会自动补上。
     /// </summary>
     private static readonly RvaSet Gl = new() {
-        Name = "国际服 GenshinImpact.exe（仅文件名 RVA 已定位）",
+        Name = "国际服 GenshinImpact.exe（7.1 值，未复核）",
         Fingerprint = 0x00000000,
         NativeSetFile = 0x070507A0,
+        // 国际服 7.1 的值；7.2 国际服未定位（本机没有客户端，不编造）。
+        // 注意：Gl 整套仍是 7.1 值，且 Fingerprint=0（未登记），跑 7.2 国际服时先跑 update_rva。
+        MediaPlayerKeys = 0x12DA2A40,
     };
 
     /// <summary>主模块候选名 → 决定用哪套 RVA 常量（A7）。</summary>
@@ -521,28 +542,33 @@ internal static unsafe class Application {
         }
     }
 
-    // ==================== 核心钩子（唯一的 il2cpp 钩子：NF = 文件名来源） ====================
+    // ==================== 核心钩子（2 个 il2cpp 补丁：NF + CriwareMediaPlayer） ====================
     //
-    // 为什么只有 1 个（实测 2026-10-16，v20 定稿）：
-    //   7.1 的密钥只走 bcrypt 通路（BCKEY/BCENC），不经过任何托管/包装 API
-    //  （原 S2/S3/N2/N3 四个 MANAKEY 钩子整场游戏 0 次调用，已随诊断一起删除）。
-    //   NativeMethods_SetFile 提供"当前播放的视频文件名"，是密钥归属的唯一来源。
+    // 2026-11-03：从 1 个恢复成 2 个。v20 曾把 S2/S3/N2/N3 全部删掉，理由是「整场 0 次调用」；
+    // 但那次 xref 扫的 S3 地址是 0x07054B80（= UpdateWithUserTime），正确的
+    // SetVideoAesKeyAudioDecryptionKey 是 0x070548F0（7.2 是 0x0717E440），7.1/7.2 里都有 2 处调用。
+    // 现在只补 **1 处**（CriwareMediaPlayer 的设钥函数）：它同时覆盖音频 key 和旧 videoKey，
+    // 不需要把 S2/S3/N2/N3 四个都挂回来（S2/N2/N3 确实 0 次调用，挂了只是浪费补丁面积）。
+    //
+    //   NF  NativeMethods_SetFile          → 当前视频文件名
+    //   MP  CriwareMediaPlayer.<混淆名>     → mode/key64/aes[]/hasAudio（MANAKEY4）
 
     private static delegate* unmanaged<int, nint, nint, void> _nf;
 
     /// <summary>
-    /// 唯一的 il2cpp 钩子：<c>NativeMethods_SetFile(int, IntPtr, string)</c>。
+    /// 文件名钩子：<c>NativeMethods_SetFile(int, IntPtr, string)</c>。
     ///
-    /// 它是"密钥 → 视频文件名"归属的唯一来源，而且实测在所有服务器/版本上都稳定触发
-    /// （日志里的 <c>★ 文件 [i]: Cs_ZD_…</c> 就是它）。密钥本身来自 bcrypt 钩子（不在 il2cpp 段）。
+    /// 它是"密钥 → 视频文件名"归属的稳定来源（日志里的 <c>★ 文件 [i]: Cs_ZD_…</c>）。
+    /// 密钥本身来自 bcrypt 钩子与 MP 钩子。
     /// </summary>
     private static void AttachCore() {
         // GMK_STRICT=1 且"指纹已登记但不匹配" → 主动不挂。
         // 只有 Mismatch 才拦：Unregistered（例如国际服还没登记指纹）如果也拦，
         // 这个开关会让人一个钩子都挂不上，反而比不检查更糟。
         if (Options.StrictVersion && _versionState == VersionGuard.State.Mismatch) {
-            Goshujin.Report("[skip] NativeMethods_SetFile: GMK_STRICT=1 且版本指纹不匹配 → " +
-                            "不挂 NF（避免把补丁打到别的函数上）。跑 tools\\update_rva.cmd 迁移后重试");
+            Goshujin.Report("[skip] NativeMethods_SetFile / CriwareMediaPlayer: " +
+                            "GMK_STRICT=1 且版本指纹不匹配 → 不挂这两个 il2cpp 钩子" +
+                            "（避免把补丁打到别的函数上）。跑 tools\\update_rva.cmd 迁移后重试");
             return;
         }
         if (TryResolveTarget("NativeMethods_SetFile", Rva.NativeSetFile, out var nf)) {
@@ -556,6 +582,133 @@ internal static unsafe class Application {
                 }
             });
         }
+        // 第二个 il2cpp 钩子：音频 key + 旧 videoKey（与 NF 是两个独立函数，各 1 处补丁）
+        AttachMediaPlayerKeys();
+    }
+
+    // ==================== 第二个 il2cpp 钩子：CriwareMediaPlayer 密钥结构 ====================
+    //
+    // 为什么加它（2026-11-03）：v20 曾认定「4 个设密钥函数 0 次调用」，但那次 xref 扫的
+    // S3 地址是 0x07054B80 —— 它其实是 Player.UpdateWithUserTime；正确的
+    // SetVideoAesKeyAudioDecryptionKey 是 0x070548F0（7.2 是 0x0717E440），在 7.1/7.2 里
+    // 各有 2 处直接调用，全部来自 CriwareMediaPlayer 的同一个设钥函数。
+    //
+    // 这个函数同时处理两套体系（反汇编确认，7.1/7.2 结构一致）：
+    //   mode 0 → [this+0xC0] 旧体系 videoKey；audioKey 与它同值（只上报 videoKey）
+    //   mode 1 → [this+0xC8] AES byte[16]；[this+0xC0] audioKey
+    // 文件名在 [this+0x88]（get_videoRuntimePath 的返回值）。
+    //
+    // 注意：不要去钩 SetVideoAudioDecryptionKeys / CRIWARE948D1068 —— 旧分支的 P/Invoke
+    // stub 被内联进了调用者，那两个方法体整场游戏 0 次执行（7.1/7.2 都实测为 0 处调用）。
+
+    private static delegate* unmanaged<nint, void> _mp;
+    private static readonly Lock _mpGate = new();
+    private static string _lastMpMessage = "";
+
+    private static void AttachMediaPlayerKeys() {
+        if (!TryResolveTarget("CriwareMediaPlayer.<set-keys>", Rva.MediaPlayerKeys, out var mp)) {
+            return;
+        }
+        Safe("AttachCore:MP", () => {
+            delegate* unmanaged<nint, void> h = &OnMediaPlayerKeys;
+            if (MinHook.Attach(mp, (nint) h, out var tr)) {
+                _mp = (delegate* unmanaged<nint, void>) tr;
+                Goshujin.Report($"hook CriwareMediaPlayer 设钥函数 @ 0x{mp:X}（音频 key + 旧 videoKey）");
+            } else {
+                Goshujin.Report($"hook CriwareMediaPlayer 设钥函数失败（MH 错误码 {MinHook.LastError}）");
+            }
+        });
+    }
+
+    [UnmanagedCallersOnly]
+    private static void OnMediaPlayerKeys(nint self) {
+        var original = _mp;
+        try {
+            if (original != null) {
+                original(self);
+            }
+        } catch (Exception e) {
+            LogException("OnMediaPlayerKeys:call", e);
+        }
+        try {
+            ReportMediaPlayerKeys(self);
+        } catch (Exception e) {
+            LogException("OnMediaPlayerKeys:report", e);
+        }
+    }
+
+    /// <summary>
+    /// 从 CriwareMediaPlayer 对象读密钥并上报（MANAKEY4）。
+    /// 只读、不改任何字段 —— 真正的设钥仍由原函数完成。
+    /// </summary>
+    private static void ReportMediaPlayerKeys(nint self) {
+        // +0x88 的路径字符串 + 到 +0xD0 的 bool，一次可读性检查覆盖整段结构
+        if (self == 0 ||
+            !Native.IsReadable(self + Offsets.MediaPlayerPathOffset, Offsets.MediaPlayerStructSize)) {
+            return;
+        }
+        var mode = *(int*) (self + Offsets.MediaPlayerModeOffset);
+        if (mode is not (0 or 1)) {
+            return;
+        }
+        var key64 = *(ulong*) (self + Offsets.MediaPlayerKey64Offset);
+        var hasAudio = *(byte*) (self + Offsets.MediaPlayerHasAudioOffset) != 0;
+        var aes = mode == 1
+            ? ReadAesKey(*(nint*) (self + Offsets.MediaPlayerAesArrayOffset))
+            : "";
+        // mode 0 只上报 videoKey：旧体系 videoKey 与 audioKey 是同一个值
+        //（HCA 只用低 56 位），库里只存一个，格式与 hk4e_keys.json 的旧条目一致。
+        // mode 1 才分开上报 audio。
+        var videoKey = mode == 0 && key64 != 0 ? key64.ToString("X16") : "";
+        var audio = mode == 1 && hasAudio && key64 != 0 ? key64.ToString("X16") : "";
+        if (aes.Length == 0 && videoKey.Length == 0 && audio.Length == 0) {
+            return;   // 清零调用 / 结构还没填好
+        }
+
+        var file = FileNameOf(ReadIl2CppString(*(nint*) (self + Offsets.MediaPlayerPathOffset)));
+        if (file.Length == 0) {
+            file = Volatile.Read(ref s_curFile) ?? "?";   // 路径读不到时退回 NF 的当前文件
+        }
+        var sb = new StringBuilder(160);
+        sb.Append("MANAKEY4 file=").Append(file).Append(" mode=").Append(mode);
+        if (aes.Length > 0) {
+            sb.Append(" aes=").Append(aes);
+        }
+        if (videoKey.Length > 0) {
+            sb.Append(" videoKey=").Append(videoKey);
+        }
+        if (audio.Length > 0) {
+            sb.Append(" audio=").Append(audio);
+        }
+        var message = sb.ToString();
+        using (_mpGate.EnterScope()) {
+            if (string.Equals(message, _lastMpMessage, StringComparison.Ordinal)) {
+                return;   // 同一视频重复播放 / seek：同一份内容只报一次
+            }
+            _lastMpMessage = message;
+        }
+        Goshujin.Report(message);
+    }
+
+    /// <summary>读 il2cpp byte[] 的 16 字节 AES key；长度不是 16 或不可读就返回空串。</summary>
+    private static string ReadAesKey(nint array) {
+        if (array == 0 || !Native.IsReadable(array + Offsets.ArrayLengthOffset, 4)) {
+            return "";
+        }
+        var len = *(int*) (array + Offsets.ArrayLengthOffset);
+        if (len != 16 || !Native.IsReadable(array + Offsets.ArrayDataOffset, len)) {
+            return "";
+        }
+        return Convert.ToHexString(new ReadOnlySpan<byte>((void*) (array + Offsets.ArrayDataOffset), len));
+    }
+
+    /// <summary>把路径/文件名转成密钥库用的文件名；解析失败哨兵返回空串。</summary>
+    private static string FileNameOf(string raw) {
+        if (raw.Length == 0 || raw[0] == '(') {
+            return "";
+        }
+        var name = Path.GetFileName(raw);
+        return name.Length == 0 ? "" : name;
     }
 
     /// <summary>

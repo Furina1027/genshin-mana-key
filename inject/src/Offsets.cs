@@ -32,6 +32,37 @@ internal static class Offsets {
     public const int StringLengthOffset = 0x10;
     public const int StringCharsOffset = 0x14;
 
+    /// <summary>
+    /// Il2CppArray（byte[]）：+0x18 元素个数，+0x20 起数据。
+    /// 依据：<c>Player.SetVideoAesKeyAudioDecryptionKey</c> 里就是
+    /// <c>cmp dword ptr [aesArray+0x18], 0x10</c> 校验 16 字节，再把 <c>array+0x20</c> 传给原生层。
+    /// </summary>
+    public const int ArrayLengthOffset = 0x18;
+    public const int ArrayDataOffset = 0x20;
+
+    // ==================== CriwareMediaPlayer（MoleMole）密钥结构 ====================
+    // 7.1 与 7.2 **同布局**（两版 MediaPlayerSetup 的拷贝模式逐字节一致）：
+    //   [this+0x88] = config[0x00] 16B   → videoRuntimePath（get_videoRuntimePath 直接返回它）
+    //   [this+0x98] = config[0x10] 16B
+    //   [this+0xa8] = config[0x20] 16B
+    //   [this+0xb8] = config[0x30] 16B   → mode(int) + key64(ulong)
+    //   [this+0xc8] = config[0x40] 16B   → aes byte[] + hasAudio
+    //   [this+0xd8] = config[0x50] 8B
+    // 语义（反汇编 GAKIOOPLFAA / AABGGCLCMKA 得到）：
+    //   mode==0：+0xC0 = 旧体系 videoKey（finalKey），audioKey = 同一值
+    //   mode==1：+0xC8 = AES byte[16]，+0xC0 = audioKey
+    //   +0xD0 为 bool：是否带 audio key
+    // 这些偏移是版本相关的；升级后先用 MediaPlayerSetup 的拷贝模式重新核对。
+
+    public const int MediaPlayerPathOffset = 0x88;
+    public const int MediaPlayerModeOffset = 0xB8;
+    public const int MediaPlayerKey64Offset = 0xC0;
+    public const int MediaPlayerAesArrayOffset = 0xC8;
+    public const int MediaPlayerHasAudioOffset = 0xD0;
+
+    /// <summary>从 +0x88 起需要读到的字节数（覆盖到 +0xD0 那个 bool）。</summary>
+    public const int MediaPlayerStructSize = 0x50;
+
     // ==================== 诊断输出上限（与管道协议无关，只是可读性）====================
 
     /// <summary>十六进制分块 dump：每行最多 240 字节数据（480 个十六进制字符 + 前缀 ≤ 512）。</summary>
